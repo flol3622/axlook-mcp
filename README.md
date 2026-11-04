@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/icon.png" alt="axlook" width="128" height="128">
+<img src="assets/logo.svg" alt="axlook logo" width="112" height="112">
 
 # axlook-mcp
 
@@ -13,6 +13,10 @@
 [![Tools](https://img.shields.io/badge/Tools-22-brightgreen.svg?style=flat-square)](#-tools)
 [![Sends mail](https://img.shields.io/badge/Sends_mail-never-critical.svg?style=flat-square)](#-safety-by-design)
 [![License](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](LICENSE)
+
+<br/>
+
+<img src="assets/hero.png" alt="axlook: Claude × New Outlook for Mac. Mail, drafts and calendars, driven through the macOS Accessibility API" width="100%">
 
 <br/>
 

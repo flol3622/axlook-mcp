@@ -1,0 +1,224 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640">
+  <title>axlook: Claude × New Outlook for Mac</title>
+  <defs>
+    <radialGradient id="h-blue" cx="0.8" cy="0.12" r="0.65">
+      <stop offset="0" stop-color="#5B8CFF" stop-opacity="0.22"/>
+      <stop offset="1" stop-color="#5B8CFF" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="h-indigo" cx="0.05" cy="0.0" r="0.55">
+      <stop offset="0" stop-color="#8B7CFF" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#8B7CFF" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="h-dots" width="24" height="24" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.2" fill="#1A2B5A" fill-opacity="0.09"/>
+    </pattern>
+    <linearGradient id="h-fade" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#F7F8FC" stop-opacity="0.95"/>
+      <stop offset="0.45" stop-color="#F7F8FC" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="h-win" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#FBFCFF"/>
+    </linearGradient>
+    <linearGradient id="h-winrim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0B0F1A" stop-opacity="0.10"/>
+      <stop offset="1" stop-color="#0B0F1A" stop-opacity="0.07"/>
+    </linearGradient>
+    <linearGradient id="h-amberfill" x1="0" y1="0" x2="0.6" y2="1">
+      <stop offset="0" stop-color="#FFD25A"/>
+      <stop offset="0.5" stop-color="#FFB000"/>
+      <stop offset="1" stop-color="#FF8A00"/>
+    </linearGradient>
+    <linearGradient id="h-word" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#14204A"/>
+      <stop offset="1" stop-color="#2B3A78"/>
+    </linearGradient>
+    <linearGradient id="h-amberword" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFB000"/>
+      <stop offset="1" stop-color="#F08C00"/>
+    </linearGradient>
+    <linearGradient id="h-bubble" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#F4F6FF"/>
+    </linearGradient>
+    <filter id="h-shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="24" stdDeviation="28" flood-color="#1A2B5A" flood-opacity="0.16"/>
+    </filter>
+    <filter id="h-small" x="-30%" y="-30%" width="160%" height="170%">
+      <feDropShadow dx="0" dy="8" stdDeviation="10" flood-color="#1A2B5A" flood-opacity="0.14"/>
+    </filter>
+    <filter id="h-glow" x="-40%" y="-80%" width="180%" height="260%">
+      <feGaussianBlur stdDeviation="7"/>
+    </filter>
+    <clipPath id="h-winclip"><rect x="640" y="172" width="580" height="376" rx="18"/></clipPath>
+    <linearGradient id="l-bg" x1="0.15" y1="0" x2="0.85" y2="1">
+      <stop offset="0" stop-color="#3D4BDB"/>
+      <stop offset="0.5" stop-color="#1B2374"/>
+      <stop offset="1" stop-color="#0B0F2E"/>
+    </linearGradient>
+    <radialGradient id="l-glow" cx="0.2" cy="0.04" r="0.72">
+      <stop offset="0" stop-color="#2E8CFF" stop-opacity="0.48"/>
+      <stop offset="1" stop-color="#2E8CFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="l-sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.14"/>
+      <stop offset="0.42" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="l-rim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.5"/>
+      <stop offset="0.28" stop-color="#FFFFFF" stop-opacity="0.07"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0.1"/>
+    </linearGradient>
+    <linearGradient id="l-paper" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#DCE4F8"/>
+    </linearGradient>
+    <linearGradient id="l-flap" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#EEF3FE"/>
+      <stop offset="1" stop-color="#C6D2EF"/>
+    </linearGradient>
+    <linearGradient id="l-vee" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4A72FF"/>
+      <stop offset="1" stop-color="#2447E8"/>
+    </linearGradient>
+    <linearGradient id="l-amber" x1="0" y1="0" x2="0.6" y2="1">
+      <stop offset="0" stop-color="#FFD25A"/>
+      <stop offset="0.5" stop-color="#FFB000"/>
+      <stop offset="1" stop-color="#FF8A00"/>
+    </linearGradient>
+    <filter id="l-tileshadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="16" stdDeviation="20" flood-color="#05081C" flood-opacity="0.35"/>
+    </filter>
+    <filter id="l-soft" x="-30%" y="-30%" width="160%" height="170%">
+      <feDropShadow dx="0" dy="14" stdDeviation="16" flood-color="#050818" flood-opacity="0.5"/>
+    </filter>
+    <filter id="l-curshadow" x="-40%" y="-30%" width="180%" height="170%">
+      <feDropShadow dx="6" dy="16" stdDeviation="14" flood-color="#03050F" flood-opacity="0.55"/>
+    </filter>
+    <clipPath id="l-sq"><path d="M924.0 512.0 L923.8 608.0 L923.3 644.4 L922.4 671.8 L921.1 694.5 L919.4 714.2 L917.4 731.7 L915.0 747.6 L912.3 762.1 L909.1 775.6 L905.6 788.0 L901.7 799.6 L897.3 810.5 L892.6 820.6 L887.5 830.1 L881.9 839.1 L876.0 847.4 L869.5 855.3 L862.7 862.7 L855.3 869.5 L847.4 876.0 L839.1 881.9 L830.1 887.5 L820.6 892.6 L810.5 897.3 L799.6 901.7 L788.0 905.6 L775.6 909.1 L762.1 912.3 L747.6 915.0 L731.7 917.4 L714.2 919.4 L694.5 921.1 L671.8 922.4 L644.4 923.3 L608.0 923.8 L512.0 924.0 L416.0 923.8 L379.6 923.3 L352.2 922.4 L329.5 921.1 L309.8 919.4 L292.3 917.4 L276.4 915.0 L261.9 912.3 L248.4 909.1 L236.0 905.6 L224.4 901.7 L213.5 897.3 L203.4 892.6 L193.9 887.5 L184.9 881.9 L176.6 876.0 L168.7 869.5 L161.3 862.7 L154.5 855.3 L148.0 847.4 L142.1 839.1 L136.5 830.1 L131.4 820.6 L126.7 810.5 L122.3 799.6 L118.4 788.0 L114.9 775.6 L111.7 762.1 L109.0 747.6 L106.6 731.7 L104.6 714.2 L102.9 694.5 L101.6 671.8 L100.7 644.4 L100.2 608.0 L100.0 512.0 L100.2 416.0 L100.7 379.6 L101.6 352.2 L102.9 329.5 L104.6 309.8 L106.6 292.3 L109.0 276.4 L111.7 261.9 L114.9 248.4 L118.4 236.0 L122.3 224.4 L126.7 213.5 L131.4 203.4 L136.5 193.9 L142.1 184.9 L148.0 176.6 L154.5 168.7 L161.3 161.3 L168.7 154.5 L176.6 148.0 L184.9 142.1 L193.9 136.5 L203.4 131.4 L213.5 126.7 L224.4 122.3 L236.0 118.4 L248.4 114.9 L261.9 111.7 L276.4 109.0 L292.3 106.6 L309.8 104.6 L329.5 102.9 L352.2 101.6 L379.6 100.7 L416.0 100.2 L512.0 100.0 L608.0 100.2 L644.4 100.7 L671.8 101.6 L694.5 102.9 L714.2 104.6 L731.7 106.6 L747.6 109.0 L762.1 111.7 L775.6 114.9 L788.0 118.4 L799.6 122.3 L810.5 126.7 L820.6 131.4 L830.1 136.5 L839.1 142.1 L847.4 148.0 L855.3 154.5 L862.7 161.3 L869.5 168.7 L876.0 176.6 L881.9 184.9 L887.5 193.9 L892.6 203.4 L897.3 213.5 L901.7 224.4 L905.6 236.0 L909.1 248.4 L912.3 261.9 L915.0 276.4 L917.4 292.3 L919.4 309.8 L921.1 329.5 L922.4 352.2 L923.3 379.6 L923.8 416.0Z"/></clipPath>
+    <clipPath id="l-env"><rect x="202" y="240" width="560" height="392" rx="60"/></clipPath>
+  </defs>
+  <rect width="1280" height="640" fill="#F7F8FC"/>
+  <rect width="1280" height="640" fill="url(#h-dots)"/>
+  <rect width="1280" height="640" fill="url(#h-fade)"/>
+  <rect width="1280" height="640" fill="url(#h-blue)"/>
+  <rect width="1280" height="640" fill="url(#h-indigo)"/>
+  <g transform="translate(57.7 107.1) scale(0.103)">
+  <g filter="url(#l-tileshadow)"><path d="M924.0 512.0 L923.8 608.0 L923.3 644.4 L922.4 671.8 L921.1 694.5 L919.4 714.2 L917.4 731.7 L915.0 747.6 L912.3 762.1 L909.1 775.6 L905.6 788.0 L901.7 799.6 L897.3 810.5 L892.6 820.6 L887.5 830.1 L881.9 839.1 L876.0 847.4 L869.5 855.3 L862.7 862.7 L855.3 869.5 L847.4 876.0 L839.1 881.9 L830.1 887.5 L820.6 892.6 L810.5 897.3 L799.6 901.7 L788.0 905.6 L775.6 909.1 L762.1 912.3 L747.6 915.0 L731.7 917.4 L714.2 919.4 L694.5 921.1 L671.8 922.4 L644.4 923.3 L608.0 923.8 L512.0 924.0 L416.0 923.8 L379.6 923.3 L352.2 922.4 L329.5 921.1 L309.8 919.4 L292.3 917.4 L276.4 915.0 L261.9 912.3 L248.4 909.1 L236.0 905.6 L224.4 901.7 L213.5 897.3 L203.4 892.6 L193.9 887.5 L184.9 881.9 L176.6 876.0 L168.7 869.5 L161.3 862.7 L154.5 855.3 L148.0 847.4 L142.1 839.1 L136.5 830.1 L131.4 820.6 L126.7 810.5 L122.3 799.6 L118.4 788.0 L114.9 775.6 L111.7 762.1 L109.0 747.6 L106.6 731.7 L104.6 714.2 L102.9 694.5 L101.6 671.8 L100.7 644.4 L100.2 608.0 L100.0 512.0 L100.2 416.0 L100.7 379.6 L101.6 352.2 L102.9 329.5 L104.6 309.8 L106.6 292.3 L109.0 276.4 L111.7 261.9 L114.9 248.4 L118.4 236.0 L122.3 224.4 L126.7 213.5 L131.4 203.4 L136.5 193.9 L142.1 184.9 L148.0 176.6 L154.5 168.7 L161.3 161.3 L168.7 154.5 L176.6 148.0 L184.9 142.1 L193.9 136.5 L203.4 131.4 L213.5 126.7 L224.4 122.3 L236.0 118.4 L248.4 114.9 L261.9 111.7 L276.4 109.0 L292.3 106.6 L309.8 104.6 L329.5 102.9 L352.2 101.6 L379.6 100.7 L416.0 100.2 L512.0 100.0 L608.0 100.2 L644.4 100.7 L671.8 101.6 L694.5 102.9 L714.2 104.6 L731.7 106.6 L747.6 109.0 L762.1 111.7 L775.6 114.9 L788.0 118.4 L799.6 122.3 L810.5 126.7 L820.6 131.4 L830.1 136.5 L839.1 142.1 L847.4 148.0 L855.3 154.5 L862.7 161.3 L869.5 168.7 L876.0 176.6 L881.9 184.9 L887.5 193.9 L892.6 203.4 L897.3 213.5 L901.7 224.4 L905.6 236.0 L909.1 248.4 L912.3 261.9 L915.0 276.4 L917.4 292.3 L919.4 309.8 L921.1 329.5 L922.4 352.2 L923.3 379.6 L923.8 416.0Z" fill="url(#l-bg)"/></g>
+  <g clip-path="url(#l-sq)">
+    <rect width="1024" height="1024" fill="url(#l-glow)"/>
+    <rect width="1024" height="1024" fill="url(#l-sheen)"/>
+  </g>
+  <path d="M924.0 512.0 L923.8 608.0 L923.3 644.4 L922.4 671.8 L921.1 694.5 L919.4 714.2 L917.4 731.7 L915.0 747.6 L912.3 762.1 L909.1 775.6 L905.6 788.0 L901.7 799.6 L897.3 810.5 L892.6 820.6 L887.5 830.1 L881.9 839.1 L876.0 847.4 L869.5 855.3 L862.7 862.7 L855.3 869.5 L847.4 876.0 L839.1 881.9 L830.1 887.5 L820.6 892.6 L810.5 897.3 L799.6 901.7 L788.0 905.6 L775.6 909.1 L762.1 912.3 L747.6 915.0 L731.7 917.4 L714.2 919.4 L694.5 921.1 L671.8 922.4 L644.4 923.3 L608.0 923.8 L512.0 924.0 L416.0 923.8 L379.6 923.3 L352.2 922.4 L329.5 921.1 L309.8 919.4 L292.3 917.4 L276.4 915.0 L261.9 912.3 L248.4 909.1 L236.0 905.6 L224.4 901.7 L213.5 897.3 L203.4 892.6 L193.9 887.5 L184.9 881.9 L176.6 876.0 L168.7 869.5 L161.3 862.7 L154.5 855.3 L148.0 847.4 L142.1 839.1 L136.5 830.1 L131.4 820.6 L126.7 810.5 L122.3 799.6 L118.4 788.0 L114.9 775.6 L111.7 762.1 L109.0 747.6 L106.6 731.7 L104.6 714.2 L102.9 694.5 L101.6 671.8 L100.7 644.4 L100.2 608.0 L100.0 512.0 L100.2 416.0 L100.7 379.6 L101.6 352.2 L102.9 329.5 L104.6 309.8 L106.6 292.3 L109.0 276.4 L111.7 261.9 L114.9 248.4 L118.4 236.0 L122.3 224.4 L126.7 213.5 L131.4 203.4 L136.5 193.9 L142.1 184.9 L148.0 176.6 L154.5 168.7 L161.3 161.3 L168.7 154.5 L176.6 148.0 L184.9 142.1 L193.9 136.5 L203.4 131.4 L213.5 126.7 L224.4 122.3 L236.0 118.4 L248.4 114.9 L261.9 111.7 L276.4 109.0 L292.3 106.6 L309.8 104.6 L329.5 102.9 L352.2 101.6 L379.6 100.7 L416.0 100.2 L512.0 100.0 L608.0 100.2 L644.4 100.7 L671.8 101.6 L694.5 102.9 L714.2 104.6 L731.7 106.6 L747.6 109.0 L762.1 111.7 L775.6 114.9 L788.0 118.4 L799.6 122.3 L810.5 126.7 L820.6 131.4 L830.1 136.5 L839.1 142.1 L847.4 148.0 L855.3 154.5 L862.7 161.3 L869.5 168.7 L876.0 176.6 L881.9 184.9 L887.5 193.9 L892.6 203.4 L897.3 213.5 L901.7 224.4 L905.6 236.0 L909.1 248.4 L912.3 261.9 L915.0 276.4 L917.4 292.3 L919.4 309.8 L921.1 329.5 L922.4 352.2 L923.3 379.6 L923.8 416.0Z" fill="none" stroke="url(#l-rim)" stroke-width="3"/>
+  <g filter="url(#l-soft)"><rect x="202" y="240" width="560" height="392" rx="60" fill="url(#l-paper)"/></g>
+  <g clip-path="url(#l-env)">
+    <path d="M202 240 L762 240 L516.0 460 Q482.0 484 448.0 460 Z" fill="url(#l-flap)"/>
+  </g>
+  <path d="M254 292 L452.0 446 Q482.0 468 512.0 446 L710 292" fill="none" stroke="url(#l-vee)" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="626" cy="532" r="114" fill="none" stroke="#FF9F0A" stroke-width="8" opacity="0.32" clip-path="url(#l-env)"/>
+  <circle cx="626" cy="532" r="70" fill="none" stroke="#FF9F0A" stroke-width="14"/>
+  <g filter="url(#l-curshadow)">
+    <path transform="translate(626 532) scale(0.9)" d="M0 0 L0 296 L68 232 L114 330 L164 308 L120 212 L212 210 Z" fill="url(#l-amber)" stroke="#0B0F1A" stroke-width="14" stroke-linejoin="round" paint-order="stroke"/>
+  </g>
+  <path d="M644 578 L644 682" stroke="#FFF3C4" stroke-width="11" stroke-linecap="round" opacity="0.7"/>
+</g>
+  <g font-family="-apple-system, 'SF Pro Display', 'Inter', 'Helvetica Neue', Arial, sans-serif">
+    <text x="176" y="166" font-size="19" font-weight="600" letter-spacing="3" fill="#6B7591">CLAUDE CODE PLUGIN · MCP</text>
+    <text x="62" y="330" font-size="134" font-weight="800" letter-spacing="-5" fill="url(#h-word)"><tspan fill="url(#h-amberword)">ax</tspan>look</text>
+    <text x="68" y="388" font-size="31" font-weight="700" fill="#0F1A3D">Claude × New Outlook for Mac</text>
+    <text x="68" y="426" font-size="21" font-weight="500" fill="#5A6480">Mail, drafts &amp; calendars, driven through</text>
+    <text x="68" y="454" font-size="21" font-weight="500" fill="#5A6480">the macOS Accessibility API.</text>
+    <g font-size="16" font-weight="600">
+      <rect x="68" y="490" width="150" height="34" rx="17" fill="#FFFFFF" stroke="#0B0F1A" stroke-opacity="0.12"/>
+      <circle cx="88" cy="507" r="5" fill="#2F5BFF"/>
+      <text x="101" y="513" fill="#2E3A5C">read &amp; search</text>
+      <rect x="228" y="490" width="198" height="34" rx="17" fill="#FFB000" fill-opacity="0.14" stroke="#F08C00" stroke-opacity="0.55"/>
+      <circle cx="248" cy="507" r="5" fill="#F08C00"/>
+      <text x="261" y="513" fill="#8A4F00">drafts · never sends</text>
+      <rect x="436" y="490" width="122" height="34" rx="17" fill="#FFFFFF" stroke="#0B0F1A" stroke-opacity="0.12"/>
+      <circle cx="456" cy="507" r="5" fill="#12A672"/>
+      <text x="469" y="513" fill="#2E3A5C">calendars</text>
+    </g>
+  </g>
+  <g filter="url(#h-small)">
+    <rect x="640" y="60" width="318" height="92" rx="18" fill="url(#h-bubble)" stroke="#0B0F1A" stroke-opacity="0.10"/>
+  </g>
+  <g font-family="-apple-system, 'SF Pro Display', 'Inter', 'Helvetica Neue', Arial, sans-serif">
+    <circle cx="664" cy="84" r="4.5" fill="#F08C00"/>
+    <text x="676" y="89" font-size="12" font-weight="700" letter-spacing="1.2" fill="#B86A00">YOU → CLAUDE</text>
+    <text x="660" y="115" font-size="15" font-weight="600" fill="#0F1A3D">“Tell Alice Thursday works and hold</text>
+    <text x="660" y="136" font-size="15" font-weight="600" fill="#0F1A3D">a slot for our sync. Draft only.”</text>
+  </g>
+  <g filter="url(#h-shadow)"><rect x="640" y="172" width="580" height="376" rx="18" fill="url(#h-win)"/></g>
+  <g clip-path="url(#h-winclip)" font-family="-apple-system, 'SF Pro Display', 'Inter', 'Helvetica Neue', Arial, sans-serif">
+    <rect x="640" y="172" width="580" height="42" fill="#F1F3F9"/>
+    <circle cx="664" cy="193" r="6" fill="#FF5F57"/>
+    <circle cx="684" cy="193" r="6" fill="#FEBC2E"/>
+    <circle cx="704" cy="193" r="6" fill="#28C840"/>
+    <rect x="830" y="183" width="200" height="20" rx="6" fill="#0B0F1A" fill-opacity="0.05"/>
+    <text x="930" y="197.5" font-size="12" fill="#8A93AA" text-anchor="middle">Search mail</text>
+    <rect x="640" y="214" width="236" height="334" fill="#F7F8FC"/>
+    <text x="660" y="242" font-size="14" font-weight="700" fill="#0F1A3D">Inbox</text>
+    <text x="858" y="242" font-size="12" fill="#8A93AA" text-anchor="end">12</text>
+    <rect x="648" y="254" width="220" height="62" rx="10" fill="#2F5BFF" fill-opacity="0.09" stroke="#2F5BFF" stroke-opacity="0.35"/>
+    <circle cx="674" cy="278" r="13" fill="#5B8CFF"/>
+    <text x="674" y="282.5" font-size="11" font-weight="700" fill="#FFFFFF" text-anchor="middle">AM</text>
+    <text x="696" y="276" font-size="13" font-weight="700" fill="#0F1A3D">Alice Martin</text>
+    <text x="858" y="276" font-size="11" fill="#2F5BFF" text-anchor="end">9:41</text>
+    <text x="696" y="294" font-size="12" fill="#2E3A5C">Q3 report: quick review?</text>
+    <text x="696" y="310" font-size="11" fill="#6B7591">Could you look at the figu…</text>
+    <circle cx="674" cy="348" r="13" fill="#12A672"/>
+    <text x="674" y="352.5" font-size="11" font-weight="700" fill="#FFFFFF" text-anchor="middle">BO</text>
+    <text x="696" y="346" font-size="13" font-weight="600" fill="#1C2333">Ben Okafor</text>
+    <text x="858" y="346" font-size="11" fill="#8A93AA" text-anchor="end">8:15</text>
+    <text x="696" y="364" font-size="12" fill="#4A5470">Team sync agenda</text>
+    <text x="696" y="380" font-size="11" fill="#8A93AA">Two more items for Thu…</text>
+    <rect x="660" y="394" width="196" height="1" fill="#0B0F1A" fill-opacity="0.07"/>
+    <circle cx="674" cy="418" r="13" fill="#9B5CF6"/>
+    <text x="674" y="422.5" font-size="11" font-weight="700" fill="#FFFFFF" text-anchor="middle">CL</text>
+    <text x="696" y="416" font-size="13" font-weight="600" fill="#1C2333">Chloé Laurent</text>
+    <text x="858" y="416" font-size="11" fill="#8A93AA" text-anchor="end">Mon</text>
+    <text x="696" y="434" font-size="12" fill="#4A5470">Workshop venue</text>
+    <text x="696" y="450" font-size="11" fill="#8A93AA">Room 2.14 is booked.</text>
+    <rect x="660" y="464" width="196" height="1" fill="#0B0F1A" fill-opacity="0.07"/>
+    <circle cx="674" cy="488" r="13" fill="#F08C00"/>
+    <text x="674" y="492.5" font-size="11" font-weight="700" fill="#FFFFFF" text-anchor="middle">DK</text>
+    <text x="696" y="486" font-size="13" font-weight="600" fill="#1C2333">David Kim</text>
+    <text x="858" y="486" font-size="11" fill="#8A93AA" text-anchor="end">Mon</text>
+    <text x="696" y="504" font-size="12" fill="#4A5470">Invoice #2041</text>
+    <text x="696" y="520" font-size="11" fill="#8A93AA">Attached, as discussed.</text>
+    <text x="900" y="246" font-size="17" font-weight="700" fill="#0F1A3D">Re: Q3 report</text>
+    <rect x="900" y="258" width="52" height="19" rx="9.5" fill="#FFB000" fill-opacity="0.2"/>
+    <text x="926" y="271.5" font-size="10.5" font-weight="700" fill="#8A4F00" text-anchor="middle">DRAFT</text>
+    <text x="962" y="272" font-size="12" fill="#6B7591">To: Alice Martin</text>
+    <rect x="900" y="288" width="296" height="1" fill="#0B0F1A" fill-opacity="0.08"/>
+    <text x="900" y="314" font-size="13" fill="#2E3A5C">Hi Alice,</text>
+    <text x="900" y="336" font-size="13" fill="#2E3A5C">Thursday works. I’ll bring notes</text>
+    <text x="900" y="355" font-size="13" fill="#2E3A5C">on the figures to our sync.</text>
+    <rect x="1055" y="343" width="2" height="16" fill="#F08C00"/>
+    <rect x="900" y="376" width="214" height="54" rx="10" fill="#12A672" fill-opacity="0.07" stroke="#12A672" stroke-opacity="0.8" stroke-width="1.5" stroke-dasharray="5 4"/>
+    <rect x="910" y="385" width="36" height="36" rx="8" fill="#12A672" fill-opacity="0.14"/>
+    <text x="928" y="399" font-size="8.5" font-weight="700" fill="#0E8A5E" text-anchor="middle">THU</text>
+    <text x="928" y="415" font-size="14" font-weight="800" fill="#0F1A3D" text-anchor="middle">12</text>
+    <text x="956" y="400" font-size="13" font-weight="700" fill="#0F1A3D">Team sync</text>
+    <text x="956" y="418" font-size="11.5" fill="#0E8A5E">10:00 – 10:30 · proposed</text>
+    <rect x="900" y="458" width="90" height="34" rx="9" fill="#FFFFFF" stroke="#0B0F1A" stroke-opacity="0.14"/>
+    <text x="945" y="480" font-size="13" font-weight="600" fill="#5A6480" text-anchor="middle">Discard</text>
+    <rect x="1002" y="458" width="118" height="34" rx="9" fill="#2F5BFF"/>
+    <text x="1055.0" y="480" font-size="13" font-weight="700" fill="#FFFFFF" text-anchor="middle">Save draft</text>
+  </g>
+  <rect x="640.5" y="172.5" width="579" height="375" rx="17.5" fill="none" stroke="url(#h-winrim)"/>
+  <rect x="995" y="451" width="132" height="48" rx="14" fill="none" stroke="#FFB000" stroke-width="6" opacity="0.5" filter="url(#h-glow)"/>
+  <rect x="995" y="451" width="132" height="48" rx="14" fill="none" stroke="#F08C00" stroke-width="2.5" stroke-dasharray="7 5"/>
+  <g filter="url(#h-small)" font-family="ui-monospace, 'SF Mono', Menlo, monospace">
+    <rect x="900" y="508" width="178" height="28" rx="7" fill="#FFB000"/>
+    <path d="M1022 508 L1031 500 L1040 508 Z" fill="#FFB000"/>
+    <text x="989" y="526.5" font-size="12.5" font-weight="700" fill="#1A1200" text-anchor="middle">AXButton · AXPress</text>
+  </g>
+  <path d="M958 110 C1158 110, 1170 260, 1106 449" fill="none" stroke="#F08C00" stroke-width="2.5" stroke-dasharray="2 8" stroke-linecap="round" opacity="0.9"/>
+  <circle cx="958" cy="110" r="4" fill="#F08C00"/>
+  <g filter="url(#h-small)">
+    <path transform="translate(1112 486) scale(0.15)" d="M0 0 L0 296 L68 232 L114 330 L164 308 L120 212 L212 210 Z"
+      fill="url(#h-amberfill)" stroke="#14204A" stroke-width="16" stroke-linejoin="round" paint-order="stroke"/>
+  </g>
+</svg>
