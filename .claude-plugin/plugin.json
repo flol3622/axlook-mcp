@@ -1,0 +1,32 @@
+{
+  "name": "axlook-mcp",
+  "version": "0.1.0",
+  "description": "Mail, drafts and calendars of New Outlook for Mac (Exchange, Microsoft 365, Gmail…) for Claude, through macOS Accessibility. No Graph API, no tokens, never sends.",
+  "author": {
+    "name": "Philippe Soubrier",
+    "url": "https://github.com/flol3622"
+  },
+  "homepage": "https://github.com/flol3622/axlook-mcp",
+  "repository": "https://github.com/flol3622/axlook-mcp",
+  "license": "MIT",
+  "keywords": [
+    "outlook",
+    "email",
+    "calendar",
+    "macos",
+    "accessibility",
+    "mcp"
+  ],
+  "icon": "assets/icon.png",
+  "mcpServers": {
+    "axlook": {
+      "command": "/bin/sh",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/scripts/start.sh"
+      ],
+      "env": {
+        "AXLOOK_DATA": "${CLAUDE_PLUGIN_DATA}"
+      }
+    }
+  }
+}

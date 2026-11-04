@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun test
+      - run: bun run typecheck
+      # Rebuild both shipped artifacts from source to make sure they still compile and bundle.
+      - run: bun run build
+      - name: Check the built artifacts
+        run: |
+          lipo -archs dist/axlook-helper | grep -q arm64
+          lipo -archs dist/axlook-helper | grep -q x86_64
+          dist/axlook-helper --version
+          node -e "import('./dist/axlook-mcp.js').catch(e => { console.error(e); process.exit(1) })" < /dev/null &
+          sleep 3; kill %1 2>/dev/null || true

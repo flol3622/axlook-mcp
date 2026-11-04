@@ -1,0 +1,54 @@
+{
+  "name": "axlook-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for New Outlook for Mac: mail, drafts and calendars through macOS Accessibility, no Graph API or tokens",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "outlook",
+    "new-outlook",
+    "macos",
+    "accessibility",
+    "claude",
+    "claude-code",
+    "email",
+    "calendar"
+  ],
+  "homepage": "https://github.com/flol3622/axlook-mcp#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/flol3622/axlook-mcp.git"
+  },
+  "license": "MIT",
+  "author": "Philippe Soubrier (https://github.com/flol3622)",
+  "type": "module",
+  "bin": {
+    "axlook-mcp": "dist/axlook-mcp.js"
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin"
+  ],
+  "scripts": {
+    "build": "sh scripts/build.sh",
+    "build:helper": "sh scripts/build-helper.sh",
+    "start": "bun run src/server.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit -p .",
+    "validate": "claude plugin validate . --profile directory"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "postal-mime": "^4.2.0",
+    "zod": "^4.6.7",
+    "typescript": "^5"
+  }
+}

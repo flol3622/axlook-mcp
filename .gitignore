@@ -1,0 +1,14 @@
+# dependencies (bun install)
+node_modules
+
+# local builds (dist/ is committed: the plugin ships it)
+bin/
+build/
+out
+*.tgz
+
+# code coverage
+coverage
+
+*.log
+.DS_Store

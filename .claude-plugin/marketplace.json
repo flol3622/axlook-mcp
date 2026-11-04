@@ -1,0 +1,15 @@
+{
+  "name": "axlook",
+  "description": "Claude Code plugin for New Outlook for Mac: mail, drafts and calendars through macOS Accessibility",
+  "owner": {
+    "name": "Philippe Soubrier",
+    "url": "https://github.com/flol3622"
+  },
+  "plugins": [
+    {
+      "name": "axlook-mcp",
+      "source": "./",
+      "description": "Mail, drafts and calendars of New Outlook for Mac through macOS Accessibility"
+    }
+  ]
+}
