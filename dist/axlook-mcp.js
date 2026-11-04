@@ -5865,8 +5865,8 @@ var require_dist = __commonJS((exports, module) => {
 });
 
 // src/server.ts
-import { homedir as homedir3 } from "os";
-import { join as join4, resolve as resolve3 } from "path";
+import { homedir as homedir4 } from "os";
+import { join as join5, resolve as resolve3 } from "path";
 import { rmSync } from "fs";
 
 // node_modules/zod/v3/helpers/util.js
@@ -31258,8 +31258,8 @@ async function respondDraft(ref, kind, body, opts = {}) {
       }
       if (body)
         await pasteIntoBody(win, body, !!opts.html);
-      let subject = (await ax2.findOne(win.h, { id: "subjectTextField" }, { depth: 6 }))?.value ?? "";
-      return await saveAndClose(win), { saved: !0, kind, subject };
+      let subject = (await ax2.findOne(win.h, { id: "subjectTextField" }, { depth: 6 }))?.value ?? "", from = (await ax2.findOne(win.h, { id: "accountPicker" }, { depth: 6 }))?.value ?? null;
+      return await saveAndClose(win), { saved: !0, kind, subject, from };
     } catch (e) {
       throw await abandon(win), e;
     }
@@ -36427,10 +36427,76 @@ function htmlToText2(html) {
 
 `).trim();
 }
+
+// src/conventions.ts
+import { copyFileSync, existsSync as existsSync3, mkdirSync as mkdirSync2, readFileSync, renameSync as renameSync2, writeFileSync } from "node:fs";
+import { homedir as homedir3 } from "node:os";
+import { join as join4 } from "node:path";
+var DEFAULT_KEYS = ["default_calendar", "default_from"], MAX_CHARS = 8000;
+function conventionsPath(env = process.env) {
+  let dir = env.AXLOOK_CONFIG_DIR || join4(env.XDG_CONFIG_HOME || join4(homedir3(), ".config"), "axlook");
+  return join4(dir, "conventions.md");
+}
+function parseConventions(raw) {
+  let text = raw.replace(/^﻿/, "").replace(/\r\n/g, `
+`), m = text.match(/^---\n([\s\S]*?)\n---[ \t]*(?:\n|$)/);
+  if (!m)
+    return { defaults: {}, body: text.trim() };
+  let defaults = {};
+  for (let line of m[1].split(`
+`)) {
+    let kv = line.match(/^\s*([A-Za-z_][\w-]*)\s*:\s*(.*?)\s*$/);
+    if (!kv || line.trimStart().startsWith("#"))
+      continue;
+    let value = kv[2];
+    if (/^(["']).*\1$/.test(value))
+      value = value.slice(1, -1);
+    if (value)
+      defaults[kv[1].toLowerCase()] = value;
+  }
+  return { defaults, body: text.slice(m[0].length).trim() };
+}
+function readConventions(path = conventionsPath()) {
+  if (!existsSync3(path))
+    return { path, exists: !1, defaults: {}, settings: {}, body: "", raw: "" };
+  let raw = readFileSync(path, "utf8"), { defaults: all, body } = parseConventions(raw), defaults = {}, settings = {};
+  for (let [k, v] of Object.entries(all))
+    if (DEFAULT_KEYS.includes(k))
+      defaults[k] = v;
+    else
+      settings[k] = v;
+  return { path, exists: !0, raw, defaults, settings, body };
+}
+function writeConventions(content, path = conventionsPath()) {
+  let text = content.replace(/\r\n/g, `
+`).trim() + `
+`;
+  if (text.length > MAX_CHARS)
+    throw Error(`Conventions are limited to ${MAX_CHARS} characters (got ${text.length}); keep them to the rules that matter.`);
+  if (mkdirSync2(join4(path, ".."), { recursive: !0 }), existsSync3(path)) {
+    if (readFileSync(path, "utf8") === text)
+      return { ...readConventions(path), changed: !1 };
+    copyFileSync(path, `${path}.bak`);
+  }
+  let tmp = `${path}.tmp-${process.pid}`;
+  return writeFileSync(tmp, text, { encoding: "utf8", mode: 384 }), renameSync2(tmp, path), { ...readConventions(path), changed: !0 };
+}
+function conventionsInstructions(c) {
+  if (!c.exists || !c.body && !Object.keys(c.defaults).length && !Object.keys(c.settings).length)
+    return "No personal conventions are set. If the user states a lasting preference (e.g. which calendar certain events go in), offer to save it with outlook_set_conventions.";
+  let list = (o) => Object.entries(o).map(([k, v]) => `${k}: ${v}`).join("; "), defaults = list(c.defaults), settings = list(c.settings);
+  return [
+    "The user's personal conventions (follow them unless the user asks otherwise for a specific call; outlook_get_conventions returns the current version):",
+    defaults ? `Applied by the server when a call leaves them out: ${defaults} (default_calendar → outlook_create_event, default_from → outlook_create_draft only).` : "",
+    settings ? `Other settings (guidance only, not applied by the server): ${settings}.` : "",
+    c.body.slice(0, MAX_CHARS)
+  ].filter(Boolean).join(`
+`);
+}
 // package.json
 var package_default = {
   name: "axlook-mcp",
-  version: "0.1.0",
+  version: "0.2.0",
   description: "MCP server for New Outlook for Mac: mail, drafts and calendars through macOS Accessibility, no Graph API or tokens",
   keywords: [
     "mcp",
@@ -36484,6 +36550,20 @@ var package_default = {
 };
 
 // src/server.ts
+function safeInstructions() {
+  try {
+    return conventionsInstructions(readConventions());
+  } catch (e) {
+    return `The user's conventions file could not be read (${e instanceof Error ? e.message : e}); call outlook_get_conventions for details.`;
+  }
+}
+function conventionDefault(key) {
+  try {
+    return readConventions().defaults[key];
+  } catch {
+    return;
+  }
+}
 var server = new McpServer({ name: "axlook", version: package_default.version }, {
   instructions: [
     "Controls the user's running New Outlook for Mac (all accounts, including Exchange) through macOS Accessibility.",
@@ -36492,7 +36572,9 @@ var server = new McpServer({ name: "axlook", version: package_default.version },
     "Refs identify a row by folder + subject + sender + date; if a ref goes stale, list again.",
     "Calendar: outlook_list_calendars \u2192 outlook_list_events (YYYY-MM-DD range) \u2192 refs for get/update/delete.",
     "Nothing is ever sent: drafts are saved to Drafts for the user to review and send.",
-    "Calls are serialized and take seconds (it is UI automation). Tools that need menus or typing briefly bring Outlook to the front and then return focus."
+    "Calls are serialized and take seconds (it is UI automation). Tools that need menus or typing briefly bring Outlook to the front and then return focus.",
+    "",
+    safeInstructions()
   ].join(`
 `)
 });
@@ -36511,7 +36593,7 @@ function run(fn) {
     }
   };
 }
-var ref = exports_external.string().describe("Message ref returned by outlook_list_messages / outlook_search_messages"), eventRef = exports_external.string().describe("Event ref returned by outlook_list_events"), RO = { readOnlyHint: !0, openWorldHint: !1 }, WRITE = { readOnlyHint: !1, destructiveHint: !1, openWorldHint: !1 }, expandHome = (p) => p.startsWith("~") ? join4(homedir3(), p.slice(1)) : p;
+var ref = exports_external.string().describe("Message ref returned by outlook_list_messages / outlook_search_messages"), eventRef = exports_external.string().describe("Event ref returned by outlook_list_events"), RO = { readOnlyHint: !0, openWorldHint: !1 }, WRITE = { readOnlyHint: !1, destructiveHint: !1, openWorldHint: !1 }, expandHome = (p) => p.startsWith("~") ? join5(homedir4(), p.slice(1)) : p;
 server.registerTool("outlook_status", {
   description: "Check that Outlook is running, Accessibility permission is granted, and list Outlook's windows.",
   inputSchema: {},
@@ -36640,10 +36722,13 @@ server.registerTool("outlook_create_draft", {
     subject: exports_external.string().optional(),
     body: exports_external.string().optional(),
     html: exports_external.boolean().default(!1).describe("Body is HTML"),
-    from: exports_external.string().optional().describe("Sending account e-mail address (defaults to Outlook's default account)")
+    from: exports_external.string().optional().describe("Sending account e-mail address (defaults to the conventions' default_from, else Outlook's default account)")
   },
   annotations: WRITE
-}, run(async (a) => createDraft(a)));
+}, run(async (a) => {
+  let from = a.from ?? conventionDefault("default_from");
+  return { ...await createDraft({ ...a, from }), fromSource: a.from ? "argument" : from ? "conventions default_from" : "Outlook default" };
+}));
 server.registerTool("outlook_create_reply_draft", {
   description: "Create a reply (or reply-all) draft to a message, with your text above the quoted original. Saved to Drafts, NOT sent.",
   inputSchema: { ref, body: exports_external.string(), reply_all: exports_external.boolean().default(!1), html: exports_external.boolean().default(!1) },
@@ -36684,11 +36769,14 @@ server.registerTool("outlook_create_event", {
     subject: exports_external.string().min(1),
     start: exports_external.string(),
     end: exports_external.string().optional().describe("Required unless all_day"),
-    calendar: exports_external.string().optional().describe("Calendar path or unique name (default: Outlook's default calendar)"),
+    calendar: exports_external.string().optional().describe("Calendar path or unique name. Choose it from the user's conventions; if omitted, the conventions' default_calendar is used, else Outlook's last-used calendar"),
     ...eventFields
   },
   annotations: WRITE
-}, run(async (a) => createEvent({ subject: a.subject, start: a.start, end: a.end, calendar: a.calendar, location: a.location, body: a.body, allDay: a.all_day })));
+}, run(async (a) => {
+  let calendar = a.calendar ?? conventionDefault("default_calendar");
+  return { ...await createEvent({ subject: a.subject, start: a.start, end: a.end, calendar, location: a.location, body: a.body, allDay: a.all_day }), calendarSource: a.calendar ? "argument" : calendar ? "conventions default_calendar" : "Outlook last-used calendar" };
+}));
 server.registerTool("outlook_update_event", {
   description: "Edit an event you own: change subject, times, all-day, location or description. Never sends updates to attendees (meetings with attendees are refused).",
   inputSchema: { ref: eventRef, subject: exports_external.string().optional(), start: exports_external.string().optional(), end: exports_external.string().optional(), ...eventFields },
@@ -36699,6 +36787,43 @@ server.registerTool("outlook_delete_event", {
   inputSchema: { ref: eventRef },
   annotations: { readOnlyHint: !1, destructiveHint: !0, openWorldHint: !1 }
 }, run(async (a) => deleteEvent(a.ref)));
+server.registerTool("outlook_get_conventions", {
+  description: "Read the user's personal mail and calendar conventions (which calendar each kind of event goes in, which account to send from, filing rules, tone...). Check them before creating events or drafts or filing mail.",
+  inputSchema: {},
+  annotations: RO
+}, async () => {
+  try {
+    let c = readConventions();
+    return ok({ path: c.path, exists: c.exists, defaults: c.defaults, settings: c.settings, content: c.raw || null, maxChars: MAX_CHARS });
+  } catch (e) {
+    return fail(e);
+  }
+});
+server.registerTool("outlook_set_conventions", {
+  description: "Save the user's personal conventions (replaces the whole file; the previous version is kept as .bak). Only call after the user has approved the exact text. Markdown, optionally starting with front matter: `default_calendar` (outlook_create_event) and `default_from` (outlook_create_draft) are applied automatically when a call leaves them out; other keys are guidance only.",
+  inputSchema: {
+    content: exports_external.string().min(1).max(MAX_CHARS).describe(`Full Markdown file, e.g. '---
+default_calendar: me@example.com/Calendar
+---
+# Calendars
+- Work events \u2192 \u2026'`)
+  },
+  annotations: { readOnlyHint: !1, destructiveHint: !0, idempotentHint: !1, openWorldHint: !1 }
+}, async (a) => {
+  try {
+    let c = writeConventions(a.content);
+    return ok({
+      saved: c.changed,
+      path: c.path,
+      backup: c.changed ? `${c.path}.bak` : null,
+      defaults: c.defaults,
+      settings: c.settings,
+      note: c.changed ? "Defaults apply immediately; restart the client to refresh the conventions shown in the server instructions." : "Content identical to the current file; nothing changed."
+    });
+  } catch (e) {
+    return fail(e);
+  }
+});
 var transport = new StdioServerTransport;
 await server.connect(transport);
 process.on("SIGINT", () => {

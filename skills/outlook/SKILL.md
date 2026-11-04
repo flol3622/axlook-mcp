@@ -7,6 +7,14 @@ description: Use the axlook MCP tools (outlook_*) whenever the user asks anythin
 
 The `axlook` MCP server controls the user's **New Outlook for Mac** through macOS Accessibility. It sees every account Outlook shows. Use it for every mail and calendar question unless the user names another source.
 
+## Personal conventions come first
+
+The user may have saved their own rules: which calendar each kind of event goes in, which account to send from, how to file mail. They appear in the server instructions, and `outlook_get_conventions` returns the current version.
+
+- **Follow them.** In particular, pass the `calendar` (`outlook_create_event`) and the `from` (`outlook_create_draft`) they prescribe.
+- **An explicit request wins for that call.** If the user says "put this one in Personal", do that and don't change the conventions.
+- **No conventions yet:** if the user creates their first event or draft, or states a lasting preference ("from now on…"), offer to set them up with the `conventions` skill.
+
 ## Workflow
 
 1. **Discover first, never guess.** Call `outlook_list_folders` to get paths such as `you@example.com/Inbox` or `All Accounts/Inbox` (the unified view), and `outlook_list_calendars` for calendar paths.
@@ -17,12 +25,12 @@ The `axlook` MCP server controls the user's **New Outlook for Mac** through macO
    - `outlook_save_attachments` saves attachments.
    - `outlook_move_message`, `outlook_mark_read`, `outlook_set_flag`, `outlook_archive_message` and `outlook_delete_message` change it. Delete moves it to Deleted Items.
 4. **Conversation rows.** A row with `conversationCount > 1` is a whole thread. The first call on it expands it and returns guidance. List the folder again and use the ref of the specific message.
-5. **Drafts.** `outlook_create_draft`, `outlook_create_reply_draft` and `outlook_create_forward_draft` save to Drafts and **never send**. Tell the user the draft is ready for review. Pass `from` to choose the sending account.
+5. **Drafts.** `outlook_create_draft`, `outlook_create_reply_draft` and `outlook_create_forward_draft` save to Drafts and **never send**. Tell the user the draft is ready for review. Pass `from` to `outlook_create_draft` to choose the sending account. Replies and forwards always use the account that received the original message: the result reports it as `from`. If that contradicts a convention, tell the user.
 6. **Calendar.**
    - `outlook_list_events` takes a `start` and `end` date (`YYYY-MM-DD`, at most about two months).
    - `outlook_get_event` returns one event; `full=true` adds attendees and description.
    - `outlook_create_event`, `outlook_update_event` and `outlook_delete_event` change events. Times are local wall-clock values such as `2026-11-20T10:00`.
-   - Always pass `calendar` when creating. Otherwise Outlook uses the calendar it used last.
+   - Always pass `calendar` when creating, chosen from the user's conventions. If it's left out, the server uses the conventions' `default_calendar`, or else whichever calendar Outlook used last.
 
 ## Safe operation
 

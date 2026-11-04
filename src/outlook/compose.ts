@@ -154,8 +154,10 @@ export async function respondDraft(ref: string, kind: "reply" | "replyAll" | "fo
     }
     if (body) await pasteIntoBody(win, body, !!opts.html);
     const subject = (await ax.findOne(win.h, { id: "subjectTextField" }, { depth: 6 }))?.value ?? "";
+    // Outlook answers from the account that received the original message.
+    const from = (await ax.findOne(win.h, { id: "accountPicker" }, { depth: 6 }))?.value ?? null;
     await saveAndClose(win);
-    return { saved: true, kind, subject };
+    return { saved: true, kind, subject, from };
     } catch (e) {
       await abandon(win);
       throw e;

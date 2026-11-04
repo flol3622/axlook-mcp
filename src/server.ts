@@ -11,7 +11,26 @@ import * as mail from "./outlook/mail";
 import * as compose from "./outlook/compose";
 import * as cal from "./outlook/calendar";
 import { parseEml, saveAttachments } from "./mime";
+import { conventionsInstructions, MAX_CHARS, readConventions, writeConventions } from "./conventions";
 import pkg from "../package.json";
+
+/** The user's conventions, read once at startup; a broken file must never stop the server. */
+function safeInstructions(): string {
+  try {
+    return conventionsInstructions(readConventions());
+  } catch (e) {
+    return `The user's conventions file could not be read (${e instanceof Error ? e.message : e}); call outlook_get_conventions for details.`;
+  }
+}
+
+/** Front-matter default for `key`, read fresh so edits apply without a restart. */
+function conventionDefault(key: "default_calendar" | "default_from"): string | undefined {
+  try {
+    return readConventions().defaults[key];
+  } catch {
+    return undefined;
+  }
+}
 
 const server = new McpServer(
   { name: "axlook", version: pkg.version },
@@ -24,6 +43,8 @@ const server = new McpServer(
       "Calendar: outlook_list_calendars → outlook_list_events (YYYY-MM-DD range) → refs for get/update/delete.",
       "Nothing is ever sent: drafts are saved to Drafts for the user to review and send.",
       "Calls are serialized and take seconds (it is UI automation). Tools that need menus or typing briefly bring Outlook to the front and then return focus.",
+      "",
+      safeInstructions(),
     ].join("\n"),
   },
 );
@@ -271,11 +292,15 @@ server.registerTool(
       subject: z.string().optional(),
       body: z.string().optional(),
       html: z.boolean().default(false).describe("Body is HTML"),
-      from: z.string().optional().describe("Sending account e-mail address (defaults to Outlook's default account)"),
+      from: z.string().optional().describe("Sending account e-mail address (defaults to the conventions' default_from, else Outlook's default account)"),
     },
     annotations: WRITE,
   },
-  run(async (a: compose.DraftInput) => compose.createDraft(a)),
+  run(async (a: compose.DraftInput) => {
+    const from = a.from ?? conventionDefault("default_from");
+    const r = await compose.createDraft({ ...a, from });
+    return { ...r, fromSource: a.from ? "argument" : from ? "conventions default_from" : "Outlook default" };
+  }),
 );
 
 server.registerTool(
@@ -353,14 +378,16 @@ server.registerTool(
       subject: z.string().min(1),
       start: z.string(),
       end: z.string().optional().describe("Required unless all_day"),
-      calendar: z.string().optional().describe("Calendar path or unique name (default: Outlook's default calendar)"),
+      calendar: z.string().optional().describe("Calendar path or unique name. Choose it from the user's conventions; if omitted, the conventions' default_calendar is used, else Outlook's last-used calendar"),
       ...eventFields,
     },
     annotations: WRITE,
   },
-  run(async (a: { subject: string; start: string; end?: string; calendar?: string; location?: string; body?: string; all_day?: boolean }) =>
-    cal.createEvent({ subject: a.subject, start: a.start, end: a.end, calendar: a.calendar, location: a.location, body: a.body, allDay: a.all_day }),
-  ),
+  run(async (a: { subject: string; start: string; end?: string; calendar?: string; location?: string; body?: string; all_day?: boolean }) => {
+    const calendar = a.calendar ?? conventionDefault("default_calendar");
+    const r = await cal.createEvent({ subject: a.subject, start: a.start, end: a.end, calendar, location: a.location, body: a.body, allDay: a.all_day });
+    return { ...r, calendarSource: a.calendar ? "argument" : calendar ? "conventions default_calendar" : "Outlook last-used calendar" };
+  }),
 );
 
 server.registerTool(
@@ -383,6 +410,56 @@ server.registerTool(
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
   },
   run(async (a: { ref: string }) => cal.deleteEvent(a.ref)),
+);
+
+// ------------------------------------------------------------------------------------------------
+// Personal conventions (plain file; no Outlook access, so not serialized with UI calls)
+
+server.registerTool(
+  "outlook_get_conventions",
+  {
+    description:
+      "Read the user's personal mail and calendar conventions (which calendar each kind of event goes in, which account to send from, filing rules, tone...). Check them before creating events or drafts or filing mail.",
+    inputSchema: {},
+    annotations: RO,
+  },
+  async () => {
+    try {
+      const c = readConventions();
+      return ok({ path: c.path, exists: c.exists, defaults: c.defaults, settings: c.settings, content: c.raw || null, maxChars: MAX_CHARS });
+    } catch (e) {
+      return fail(e);
+    }
+  },
+);
+
+server.registerTool(
+  "outlook_set_conventions",
+  {
+    description:
+      "Save the user's personal conventions (replaces the whole file; the previous version is kept as .bak). Only call after the user has approved the exact text. Markdown, optionally starting with front matter: `default_calendar` (outlook_create_event) and `default_from` (outlook_create_draft) are applied automatically when a call leaves them out; other keys are guidance only.",
+    inputSchema: {
+      content: z.string().min(1).max(MAX_CHARS).describe("Full Markdown file, e.g. '---\ndefault_calendar: me@example.com/Calendar\n---\n# Calendars\n- Work events → …'"),
+    },
+    annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  },
+  async (a: { content: string }) => {
+    try {
+      const c = writeConventions(a.content);
+      return ok({
+        saved: c.changed,
+        path: c.path,
+        backup: c.changed ? `${c.path}.bak` : null,
+        defaults: c.defaults,
+        settings: c.settings,
+        note: c.changed
+          ? "Defaults apply immediately; restart the client to refresh the conventions shown in the server instructions."
+          : "Content identical to the current file; nothing changed.",
+      });
+    } catch (e) {
+      return fail(e);
+    }
+  },
 );
 
 // ------------------------------------------------------------------------------------------------

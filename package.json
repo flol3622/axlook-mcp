@@ -1,6 +1,6 @@
 {
   "name": "axlook-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MCP server for New Outlook for Mac: mail, drafts and calendars through macOS Accessibility, no Graph API or tokens",
   "keywords": [
     "mcp",

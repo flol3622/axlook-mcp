@@ -10,7 +10,7 @@
 [![MCP](https://img.shields.io/badge/MCP-stdio-6e56cf.svg?style=flat-square)](https://modelcontextprotocol.io)
 [![Outlook](https://img.shields.io/badge/New_Outlook_for_Mac-16.11x-0078d4.svg?style=flat-square)]()
 [![Platform](https://img.shields.io/badge/macOS-13%2B_·_Apple_Silicon_&_Intel-lightgrey.svg?style=flat-square&logo=apple)]()
-[![Tools](https://img.shields.io/badge/Tools-22-brightgreen.svg?style=flat-square)](#-tools)
+[![Tools](https://img.shields.io/badge/Tools-24-brightgreen.svg?style=flat-square)](#-tools)
 [![Sends mail](https://img.shields.io/badge/Sends_mail-never-critical.svg?style=flat-square)](#-safety-by-design)
 [![License](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](LICENSE)
 
@@ -74,7 +74,7 @@ On older versions, or to browse the marketplace first:
 
 The plugin bundles:
 - **the MCP server**, a prebuilt universal helper and a single-file server, so there's nothing to compile or `npm install`;
-- **a skill** that tells Claude to use these tools for every mail and calendar question.
+- **two skills**: `outlook` tells Claude to use these tools for every mail and calendar question, and `conventions` sets up your personal rules (see [Personal conventions](#-personal-conventions)).
 
 Update with `/plugin update axlook-mcp`. Third-party marketplaces don't auto-update.
 
@@ -122,7 +122,7 @@ flowchart LR
     end
 
     subgraph SERVER["dist/axlook-mcp.js (Node or Bun)"]
-        B["22 MCP tools, one call at a time"]
+        B["24 MCP tools, one call at a time"]
         C["Outlook UI logic: mail · drafts · calendar"]
         D[".eml parsing, safe attachment saving"]
     end
@@ -157,6 +157,7 @@ flowchart LR
 
 👻 = runs in the background (Outlook can stay behind your windows, even on another Space).
 🪟 = briefly brings Outlook to the front for menus, dialogs or typing, then returns focus.
+📄 = local file only, no Outlook access.
 
 | Area | Tool | Mode | What it does |
 | :--- | :--- | :---: | :--- |
@@ -177,6 +178,7 @@ flowchart LR
 | | `outlook_list_events` | 👻 | Time, location, recurrence, organizer, your response, attendees |
 | | `outlook_get_event` | 👻 / 🪟 | One event; `full=true` adds the calendar name, attendee list and description |
 | | `outlook_create_event` · `outlook_update_event` · `outlook_delete_event` | 🪟 | Appointments in any calendar, using local wall-clock times |
+| **Conventions** | `outlook_get_conventions` · `outlook_set_conventions` | 📄 | Read and save your personal rules (no Outlook access) |
 
 List and search calls return **refs** (`msg_…`, `evt_…`) that the other tools take as input. Outlook's UI exposes no stable IDs, so a ref encodes where the item is shown and what it looks like. If a ref goes stale, list again.
 
@@ -196,7 +198,33 @@ Once installed, just ask:
 >
 > *"Block Friday 10:00–11:30 in my Personal calendar for 'Paper revision'."*
 
-**Tip:** tell Claude your own conventions in your `CLAUDE.md` or a personal skill, for example *"work events go in the Calendar of my work account, social ones in 'Family'"*.
+---
+
+## 🧭 Personal Conventions
+
+Everyone organizes mail and calendars differently, so axlook keeps **your rules** in one small Markdown file, `~/.config/axlook/conventions.md`. It lives outside the plugin, so it survives updates. Ask Claude:
+
+> *"Set up my axlook conventions."*
+
+The `conventions` skill reads your real calendars and accounts, asks a few questions, shows you the file, and saves it only once you approve. Later, *"from now on, put social events in Family"* updates a single rule. You can also edit the file by hand:
+
+```markdown
+---
+default_calendar: you@work.example/My Calendars/Calendar
+default_from: you@work.example
+---
+# Calendars
+- Work and professional → `you@work.example/My Calendars/Calendar`
+- Personal, for me only → `you@work.example/My Calendars/Personal`
+- Social, with my partner → `you@gmail.example/Family`
+
+# Sending
+- Work mail from `you@work.example`; private mail from `you@gmail.example`.
+```
+
+- **Rules are guidance.** The server shows the file to Claude at startup, and `outlook_get_conventions` returns the current version. Claude follows the rules when picking calendars, accounts and folders.
+- **Defaults are enforced.** In the front matter, `default_calendar` applies to new events and `default_from` to new drafts, whenever a call leaves them out. Outlook's "last used calendar" never decides. Each result tells you whether the value came from your argument, from your conventions, or from Outlook. Replies and forwards always use the account that received the original message. Any other front-matter key is guidance for Claude only.
+- **Moving the file:** set `AXLOOK_CONFIG_DIR`. The previous version is always kept as `conventions.md.bak`.
 
 ---
 
