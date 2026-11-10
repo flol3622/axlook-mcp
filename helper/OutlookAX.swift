@@ -40,6 +40,15 @@ func appElement() throws -> AXUIElement {
   return el
 }
 
+/// The main window as last seen. AX stops listing it while it sits on another Space and a different window
+/// (a reminder, an event editor) is the app's main window, but the element itself keeps answering.
+var lastMainWindow: AXUIElement?
+
+func rememberedMainWindow() -> AXUIElement? {
+  guard let w = lastMainWindow, str(attr(w, "AXIdentifier")) == "OutlookWindow" else { return nil }
+  return w
+}
+
 func register(_ e: AXUIElement) -> String {
   handleCounter += 1
   let h = "e\(handleCounter)"
@@ -58,7 +67,11 @@ func resolve(_ h: String) throws -> AXUIElement {
     if let w = attr(app, kAXFocusedWindowAttribute) { candidates.append(w as! AXUIElement) }
     candidates += (attr(app, kAXWindowsAttribute) as? [AXUIElement]) ?? []
     candidates += children(app).filter { str(attr($0, kAXRoleAttribute)) == "AXWindow" }
-    if let w = candidates.first(where: { str(attr($0, "AXIdentifier")) == "OutlookWindow" }) { return w }
+    if let w = candidates.first(where: { str(attr($0, "AXIdentifier")) == "OutlookWindow" }) {
+      lastMainWindow = w
+      return w
+    }
+    if let w = rememberedMainWindow() { return w }
     guard let w = candidates.first, str(attr(w, kAXRoleAttribute)) == "AXWindow" else { throw HelperError("Outlook has no main window") }
     return w
   case "focusedWindow":
@@ -416,6 +429,8 @@ func handle(_ req: [String: Any]) throws -> Any {
     for c in children(app) where str(attr(c, kAXRoleAttribute)) == "AXWindow" { add(c) }
     add(attr(app, kAXMainWindowAttribute).map { $0 as! AXUIElement })
     add(attr(app, kAXFocusedWindowAttribute).map { $0 as! AXUIElement })
+    if let w = all.first(where: { str(attr($0, "AXIdentifier")) == "OutlookWindow" }) { lastMainWindow = w }
+    add(rememberedMainWindow())
     let main = attr(app, kAXMainWindowAttribute).map { $0 as! AXUIElement }
     return all.map { w -> [String: Any] in
       var s = summary(w, withFrame: true)
@@ -558,16 +573,20 @@ func handle(_ req: [String: Any]) throws -> Any {
   case "activate":
     let prev = frontmostInfo()
     let app = try outlookApp()
-    if !outlookIsFrontmost() {
-      if app.isHidden { app.unhide() }
-      app.activate(options: [.activateAllWindows])
-      if !waitUntil(1500, { outlookIsFrontmost() }) {
-        AXUIElementSetAttributeValue(try appElement(), kAXFrontmostAttribute as CFString, kCFBooleanTrue)
-        _ = waitUntil(1500, { outlookIsFrontmost() })
+    // A Space switch still in flight (e.g. from a previous "restore") can take the activation back: retry.
+    for _ in 0..<3 {
+      if !outlookIsFrontmost() {
+        if app.isHidden { app.unhide() }
+        app.activate(options: [.activateAllWindows])
+        if !waitUntil(1500, { outlookIsFrontmost() }) {
+          AXUIElementSetAttributeValue(try appElement(), kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+          _ = waitUntil(1500, { outlookIsFrontmost() })
+        }
       }
+      // Let the Space switch settle so menus validate and key events land.
+      _ = waitUntil((req["settleMs"] as? Int) ?? 250, { false })
+      if outlookIsFrontmost() { break }
     }
-    // Let the Space switch settle so menus validate and key events land.
-    _ = waitUntil((req["settleMs"] as? Int) ?? 250, { false })
     return ["previous": prev, "active": outlookIsFrontmost()]
 
   case "restore":

@@ -1,6 +1,6 @@
 {
   "name": "axlook-mcp",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Mail, drafts and calendars of New Outlook for Mac (Exchange, Microsoft 365, Gmail…) for Claude, through macOS Accessibility. No Graph API, no tokens, never sends.",
   "author": {
     "name": "Philippe Soubrier",

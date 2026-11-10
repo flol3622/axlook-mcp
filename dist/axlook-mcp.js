@@ -30261,6 +30261,10 @@ async function withFocus(fn) {
       await ax2.call("restore", { pid: prev.pid }).catch(() => {});
   }
 }
+async function bringToFront() {
+  if (!(await ax2.call("activate", { settleMs: 150 })).active)
+    throw new OutlookError2("Could not bring Outlook to the front.");
+}
 async function switchModule(mod) {
   let w = await mainWindow(), isThere = async () => {
     if (mod === "Calendar")
@@ -30290,6 +30294,10 @@ async function need(h, match, what, opts = {}) {
 }
 async function secondaryWindows() {
   return (await windows2()).filter((w) => w.id !== "OutlookWindow" && w.role === "AXWindow" && w.subrole === "AXStandardWindow");
+}
+async function newWindow(before, accept = () => !0) {
+  let count = (ws, title) => ws.filter((w) => w.title === title).length, now = await secondaryWindows();
+  return now.find((w) => accept(w) && count(now, w.title) > count(before, w.title)) ?? null;
 }
 async function bodyEditor(root, timeoutMs = 5000) {
   let area = await until(async () => {
@@ -30467,32 +30475,51 @@ function parseRowDesc(desc) {
 async function messageTable() {
   return need("main", { role: "AXTable", desc: "Message List" }, "the message list", { depth: 8, timeoutMs: 4000 });
 }
+async function listSignature() {
+  let t = await ax2.findOne("main", { role: "AXTable", desc: "Message List" }, { depth: 8 });
+  if (!t)
+    return null;
+  let cells = await ax2.find(t.h, { role: "AXCell" }, { depth: 2, limit: 6 });
+  return cells.map((c) => c.desc ?? "").join("|") + `#${cells.length}`;
+}
 async function waitListSettled() {
   let last = "";
   await until(async () => {
-    let t = await ax2.findOne("main", { role: "AXTable", desc: "Message List" }, { depth: 8 });
-    if (!t)
+    let sig = await listSignature();
+    if (sig === null)
       return !1;
-    let cells = await ax2.find(t.h, { role: "AXCell" }, { depth: 2, limit: 6 }), sig = cells.map((c) => c.desc ?? "").join("|") + `#${cells.length}`, stable = sig === last;
+    let stable = sig === last;
     return last = sig, stable;
   }, 4000, 250);
 }
 function isGroupHeader(desc) {
   return /^[^,]+, (Expanded|Collapsed)$/.test(desc.trim());
 }
+function expandedConversation(desc) {
+  let m = desc.match(/^\s*Expanded, Conversation, (\d+) messages?,/);
+  return m ? Number(m[1]) : null;
+}
 async function readRows(table) {
-  let rowsEl = await ax2.call("elements", { h: table.h, attr: "AXRows", subtree: 1 }), rows = [], group = null;
-  for (let r of rowsEl) {
+  let rowsEl = await ax2.call("elements", { h: table.h, attr: "AXRows", subtree: 1 }), rows = [], group = null, thread = null;
+  return rowsEl.forEach((r, i) => {
     let desc = r.children?.find((c) => c.role === "AXCell")?.desc ?? "";
     if (isGroupHeader(desc)) {
-      group = desc.split(",")[0].trim();
-      continue;
+      group = desc.split(",")[0].trim(), thread = null;
+      return;
+    }
+    let count = expandedConversation(desc);
+    if (count !== null) {
+      thread = { id: i, count, pos: 0 };
+      return;
     }
     let p = parseRowDesc(desc);
-    if (p)
+    if (!p)
+      return;
+    if (thread && thread.pos < thread.count && !p.conversationCount)
+      rows.push({ ...p, group, h: r.h, thread: { ...thread, pos: thread.pos++ } });
+    else
       rows.push({ ...p, group, h: r.h });
-  }
-  return rows;
+  }), rows;
 }
 async function cellCount() {
   let t = await ax2.findOne("main", { role: "AXTable", desc: "Message List" }, { depth: 8 });
@@ -30537,14 +30564,14 @@ function decodeRef(ref) {
     throw new OutlookError2(`Invalid message ref "${ref.slice(0, 40)}…". Use refs returned by outlook_list_messages or outlook_search_messages.`);
   }
 }
-var previewKey = (preview) => preview.slice(0, 60), sameRow = (r, d) => r.subject === d.s && r.sender === d.n && r.date === d.d && previewKey(r.preview) === d.p;
+var previewKey = (preview) => preview.slice(0, 60), sameRow = (r, d) => r.subject === d.s && r.sender === d.n && r.date === d.d && previewKey(r.preview) === d.p, isConversation = (r) => (r.conversationCount ?? 0) >= 2, stripPrefixes = (x) => x.replace(/^((re|fw|fwd|aw|tr|wg)\s*:\s*)+/i, "").trim();
 function toSummaries(rows, f, q) {
   let seen = /* @__PURE__ */ new Map;
   return rows.map((r, i) => {
-    let p = previewKey(r.preview), key = `${r.subject}\x00${r.sender}\x00${r.date}\x00${p}`, k = seen.get(key) ?? 0;
+    let p = previewKey(r.preview), c = isConversation(r) ? r.conversationCount : void 0, key = `${r.subject}\x00${r.sender}\x00${r.date}\x00${p}\x00${c ? 1 : 0}`, k = seen.get(key) ?? 0;
     seen.set(key, k + 1);
-    let { h, ...rest } = r;
-    return { ref: encodeRef({ v: 2, f, q, s: r.subject, n: r.sender, d: r.date, p, k }), index: i, ...rest };
+    let { h, thread, ...rest } = r;
+    return { ref: encodeRef({ v: 2, f, q, s: r.subject, n: r.sender, d: r.date, p, k, c }), index: i, ...rest };
   });
 }
 async function listMessages(opts) {
@@ -30568,18 +30595,19 @@ async function exitSearch() {
       return;
   throw new OutlookError2("Could not leave Outlook's search results view.");
 }
-async function runSearch(query) {
-  let field = await searchField();
+async function runSearch(query, enough = 1 / 0) {
+  let field = await searchField(), folderList = await listSignature();
   if (await ax2.set(field.h, "AXValue", query), await ax2.press(field.h, "AXConfirm"), !await until(async () => ((await ax2.get("main")).title ?? "").startsWith("Searching"), 6000))
     throw new OutlookError2("Outlook did not start the search.");
+  if (await until(async () => await listSignature() !== folderList, 12000, 250), !await until(async () => await cellCount() > 0, 8000, 300))
+    return;
+  let last = 0, since = Date.now();
   await until(async () => {
-    let t = await ax2.findOne("main", { role: "AXTable", desc: "Message List" }, { depth: 8 });
-    if (t) {
-      if ((await ax2.find(t.h, { role: "AXCell", descContains: "Sender:" }, { depth: 2, limit: 1 })).length)
-        return !0;
-    }
-    return !!await ax2.findOne("main", { descContains: "No Search Results" }, { depth: 12 });
-  }, 20000, 400), await waitListSettled();
+    let n = await cellCount();
+    if (n !== last)
+      last = n, since = Date.now();
+    return n >= enough + 2 || Date.now() - since > 2500;
+  }, 20000, 300), await waitListSettled();
 }
 async function defaultScope() {
   let rows = await readFolderRows();
@@ -30592,7 +30620,7 @@ async function defaultScope() {
 }
 async function searchMessages(opts) {
   let scope = opts.folder ?? await defaultScope(), folder = await openFolder(scope);
-  await runSearch(opts.query);
+  await runSearch(opts.query, opts.limit ?? 25);
   let rows = await loadRows(opts.limit ?? 25), title = (await ax2.get("main")).title ?? "";
   return {
     query: opts.query,
@@ -30600,29 +30628,92 @@ async function searchMessages(opts) {
     messages: toSummaries(rows, folder.path, opts.query).slice(0, opts.limit ?? 25)
   };
 }
+async function rowDesc(h) {
+  return (await ax2.tree(h, 1).catch(() => null))?.children?.find((c) => c.role === "AXCell")?.desc ?? null;
+}
+async function expandConversation(row) {
+  await ax2.set(row.h, "AXSelected", !0).catch(() => {}), await until(async () => expandedConversation(await rowDesc(row.h) ?? "") !== null, 4000, 200), await waitListSettled();
+  let rows = await readRows(await messageTable()), opened = rows.find((r) => r.thread?.pos === 0 && r.thread.count === row.conversationCount && stripPrefixes(r.subject) === stripPrefixes(row.subject));
+  if (opened?.unread)
+    await restoreUnread(opened).catch(() => !1);
+  return rows;
+}
+function shownMessage(rows, d) {
+  let exact = rows.filter((r) => r.thread && r.date === d.d && previewKey(r.preview) === d.p);
+  return exact.length ? exact : rows.filter((r) => r.thread?.pos === 0 && r.date === d.d && stripPrefixes(r.subject) === stripPrefixes(d.s));
+}
+function candidates(rows, data) {
+  let same = rows.filter((r) => sameRow(r, data)), singles = same.filter((r) => !isConversation(r)), convs = same.filter(isConversation);
+  if (!data.c)
+    return singles.length ? singles : convs;
+  if (convs.length)
+    return convs;
+  return shownMessage(rows, data);
+}
 async function locate(ref) {
   let data = decodeRef(ref);
   await assertNoInlineDraft();
   let title = (await ax2.get("main")).title ?? "", field = data.q ? await ax2.findOne("main", { role: "AXTextField", subrole: "AXSearchField", id: "Search Bar" }, { depth: 3 }) : null;
   if (!(!!data.q && title.startsWith("Searching") && field?.value === data.q)) {
     if (await openFolder(data.f), data.q)
-      await runSearch(data.q);
+      await runSearch(data.q, 25);
   }
-  let want = 25;
-  for (let i = 0;i < 6; i++) {
-    let rows = await loadRows(want), matches = rows.filter((r) => sameRow(r, data)), row = matches[data.k];
-    if (row)
-      return { row, data, matches: matches.length };
-    if (rows.length < want)
+  let pick2 = (rows2) => {
+    let matches = candidates(rows2, data), row = matches[data.k] ?? (data.q ? matches[matches.length - 1] : void 0);
+    return row ? { row, data, matches: matches.length } : null;
+  }, rows = [], want = 25;
+  for (let i = 0;i < 8; i++) {
+    rows = await loadRows(want);
+    let hit = pick2(rows);
+    if (hit)
+      return hit;
+    if (rows.length >= want) {
+      want *= 3;
+      continue;
+    }
+    if (!data.q)
       break;
-    want *= 3;
+    let n = await cellCount();
+    if (!await until(async () => await cellCount() > n ? !0 : null, 4000, 300))
+      break;
   }
-  throw new OutlookError2(`Message "${data.s}" from ${data.n} (${data.d}) is no longer in "${data.f}". List the folder again to get a fresh ref.`);
+  if (!data.c) {
+    let hidden = (r) => isConversation(r) && stripPrefixes(r.subject) === stripPrefixes(data.s);
+    for (let i = 0;i < 3; i++) {
+      let conv = rows.find(hidden);
+      if (!conv)
+        break;
+      rows = await expandConversation(conv);
+      let hit = pick2(rows);
+      if (hit)
+        return hit;
+    }
+  }
+  throw new OutlookError2(`Message "${data.s}" from ${data.n} (${data.d}) is no longer in "${data.f}"${data.q ? ` (search "${data.q}")` : ""}. List or search again to get a fresh ref.`);
 }
-async function guardConversation(row) {
-  if (!row.conversationCount || row.conversationCount < 2)
-    return;
-  throw await ax2.set(row.h, "AXSelected", !0).catch(() => {}), await sleep(800), new OutlookError2(`This ref is a conversation of ${row.conversationCount} messages. Outlook has expanded it: list the folder again and use the ref of the specific message (conversation members from other folders show a "folder" field).`);
+async function openMessage(ref, opts = {}) {
+  for (let attempt = 0;; attempt++) {
+    let loc = await locate(ref), { row } = loc, conversation;
+    if (isConversation(row) || loc.data.c && row.thread) {
+      let rows = isConversation(row) ? await expandConversation(row) : await readRows(await messageTable()), shown = isConversation(row) ? shownMessage(rows, { s: row.subject, d: row.date, p: previewKey(row.preview) })[0] : row, all = toSummaries(rows, loc.data.f, loc.data.q);
+      if (conversation = shown?.thread ? all.filter((_, i) => rows[i].thread?.id === shown.thread.id) : [], opts.single || !shown) {
+        let members2 = conversation.map((m) => `
+- ${m.ref}: ${m.sender}, ${m.date}${m.folder ? `, in ${m.folder}` : ""}`).join("");
+        throw new OutlookError2(`This ref is a conversation of ${row.conversationCount ?? row.thread?.count} messages${members2 ? "; use the ref of one of its messages:" + members2 : ". Outlook has expanded it: list the folder again and use the ref of the specific message."}`);
+      }
+      row = shown;
+    }
+    try {
+      return await selectRow(row), { ...loc, row, conversation };
+    } catch (e) {
+      if (attempt >= 1)
+        throw e;
+    }
+  }
+}
+async function locateSingle(ref) {
+  let loc = await locate(ref);
+  return isConversation(loc.row) || loc.data.c && loc.row.thread ? openMessage(ref, { single: !0 }) : loc;
 }
 async function headerInfo() {
   let header = await ax2.findOne("main", { id: "HeaderMainContainer" }, { depth: 7, subtree: 3 }), subject = null, from = null;
@@ -30640,7 +30731,7 @@ async function headerInfo() {
 }
 async function selectRow(row) {
   await ax2.set(row.h, "AXSelected", !0);
-  let norm = (x) => x.replace(/^((re|fw|fwd|aw|tr|wg)\s*:\s*)+/i, "").trim(), matchesSubject = (s) => s !== null && (s === row.subject || norm(s) === norm(row.subject) || row.subject === "" && /^[(<]?no subject[)>]?$/i.test(s));
+  let norm = stripPrefixes, matchesSubject = (s) => s !== null && (s === row.subject || norm(s) === norm(row.subject) || row.subject === "" && /^[(<]?no subject[)>]?$/i.test(s));
   if (!await until(async () => {
     if (!(await ax2.get(row.h).catch(() => null))?.selected)
       return !1;
@@ -30707,7 +30798,7 @@ async function readReadingPane() {
   };
 }
 async function rowUnread(row) {
-  let desc = (await ax2.tree(row.h, 1).catch(() => null))?.children?.find((c) => c.role === "AXCell")?.desc;
+  let desc = await rowDesc(row.h);
   return desc ? parseRowDesc(desc)?.unread ?? null : null;
 }
 async function restoreUnread(row) {
@@ -30718,9 +30809,11 @@ async function restoreUnread(row) {
   }), !!await until(async () => await rowUnread(row) === !0 ? !0 : null, 3000, 250);
 }
 async function readMessage(ref, opts = {}) {
-  let { row } = await locate(ref);
-  await guardConversation(row), await selectRow(row), await sleep(300);
+  let { row, conversation } = await openMessage(ref);
+  await sleep(300);
   let view = await readReadingPane(), result = { ref, ...view };
+  if (conversation)
+    result.conversation = conversation;
   if (row.unread && !opts.markAsRead)
     result.unreadRestored = await restoreUnread(row).catch(() => !1);
   return result;
@@ -30744,9 +30837,7 @@ async function cancelSheet(match) {
     await ax2.press(cancel.h).catch(() => {});
 }
 async function exportEml(ref, outPath) {
-  let { row } = await locate(ref);
-  await guardConversation(row), await selectRow(row);
-  let token = `axlook-${process.pid}-${Date.now().toString(36)}`, saved = join2(DOWNLOADS, `${token}.eml`);
+  let { row } = await openMessage(ref), token = `axlook-${process.pid}-${Date.now().toString(36)}`, saved = join2(DOWNLOADS, `${token}.eml`);
   if (await withFocus(async () => {
     try {
       await ax2.menu(["File", "Save As..."]);
@@ -30785,8 +30876,8 @@ async function moveMessage(ref, destination) {
   let dest = await findFolderRow(destination);
   if (dest.section === "All Accounts" || dest.section === "Favorites")
     throw new OutlookError2("Pick a destination inside a specific account (not 'All Accounts' or 'Favorites').");
-  let { row, data, matches } = await locate(ref);
-  return await guardConversation(row), await selectRow(row), await withFocus(async () => {
+  let { row, data, matches } = await openMessage(ref, { single: !0 });
+  return await withFocus(async () => {
     try {
       await ax2.menu(["Message", "Move", "Choose Folder..."]);
       let box = await need("main", { role: "AXTextField", desc: "search box" }, "the Move dialog", { depth: 3, timeoutMs: 5000 }), sheet = await ax2.call("parent", { h: box.h });
@@ -30808,8 +30899,8 @@ async function moveMessage(ref, destination) {
   }), { moved: !0, verified: !!await until(async () => await countMatches(data) === matches - 1 ? !0 : null, 8000, 500), from: data.f, to: dest.path };
 }
 async function setReadState(ref, read) {
-  let { row } = await locate(ref);
-  if (await guardConversation(row), row.unread === !read)
+  let { row } = await locateSingle(ref);
+  if (row.unread === !read)
     return { changed: !1, unread: row.unread };
   if (await selectRow(row), await sleep(800), await rowUnread(row) === !read)
     return { changed: !0, unread: !read };
@@ -30820,12 +30911,12 @@ async function setReadState(ref, read) {
   return { changed: !0, unread: !read };
 }
 async function rowFlagged(row) {
-  let desc = (await ax2.tree(row.h, 1).catch(() => null))?.children?.find((c) => c.role === "AXCell")?.desc;
+  let desc = await rowDesc(row.h);
   return desc ? parseRowDesc(desc)?.flagged ?? null : null;
 }
 async function setFlag(ref, flagged) {
-  let { row } = await locate(ref);
-  if (await guardConversation(row), row.flagged === flagged)
+  let { row } = await locateSingle(ref);
+  if (row.flagged === flagged)
     return { changed: !1, flagged };
   if (await selectRow(row), await withFocus(async () => {
     let opts = await need("main", { role: "AXButton", help: "View Flag for follow up options" }, "the flag options button", { depth: 3 });
@@ -30839,16 +30930,16 @@ async function setFlag(ref, flagged) {
   return { changed: !0, flagged };
 }
 async function archiveMessage(ref) {
-  let { row, data, matches } = await locate(ref);
-  return await guardConversation(row), await selectRow(row), await withFocus(async () => {
+  let { row, data, matches } = await openMessage(ref, { single: !0 });
+  return await withFocus(async () => {
     await ax2.menu(["Message", "Archive"]);
   }), { archived: !0, verified: !!await until(async () => await countMatches(data) === matches - 1 ? !0 : null, 6000, 500), from: data.f };
 }
 async function deleteMessage(ref) {
-  let { row, data, matches } = await locate(ref);
-  if (await guardConversation(row), /deleted items|deleted messages|trash|bin/i.test(data.f))
+  if (/deleted items|deleted messages|trash|bin/i.test(decodeRef(ref).f))
     throw new OutlookError2("Refusing to delete from a deleted-items folder: Outlook would delete it permanently.");
-  return await selectRow(row), await withFocus(async () => {
+  let { data, matches } = await openMessage(ref, { single: !0 });
+  return await withFocus(async () => {
     if (!await ax2.findOne("main", { id: "subjectTextField" }, { depth: 10 })) {
       await ax2.menu(["Edit", "Delete"]);
       return;
@@ -30992,32 +31083,51 @@ function parseRowDesc2(desc) {
 async function messageTable2() {
   return need("main", { role: "AXTable", desc: "Message List" }, "the message list", { depth: 8, timeoutMs: 4000 });
 }
+async function listSignature2() {
+  let t = await ax2.findOne("main", { role: "AXTable", desc: "Message List" }, { depth: 8 });
+  if (!t)
+    return null;
+  let cells = await ax2.find(t.h, { role: "AXCell" }, { depth: 2, limit: 6 });
+  return cells.map((c) => c.desc ?? "").join("|") + `#${cells.length}`;
+}
 async function waitListSettled2() {
   let last = "";
   await until(async () => {
-    let t = await ax2.findOne("main", { role: "AXTable", desc: "Message List" }, { depth: 8 });
-    if (!t)
+    let sig = await listSignature2();
+    if (sig === null)
       return !1;
-    let cells = await ax2.find(t.h, { role: "AXCell" }, { depth: 2, limit: 6 }), sig = cells.map((c) => c.desc ?? "").join("|") + `#${cells.length}`, stable = sig === last;
+    let stable = sig === last;
     return last = sig, stable;
   }, 4000, 250);
 }
 function isGroupHeader2(desc) {
   return /^[^,]+, (Expanded|Collapsed)$/.test(desc.trim());
 }
+function expandedConversation2(desc) {
+  let m = desc.match(/^\s*Expanded, Conversation, (\d+) messages?,/);
+  return m ? Number(m[1]) : null;
+}
 async function readRows2(table) {
-  let rowsEl = await ax2.call("elements", { h: table.h, attr: "AXRows", subtree: 1 }), rows = [], group = null;
-  for (let r of rowsEl) {
+  let rowsEl = await ax2.call("elements", { h: table.h, attr: "AXRows", subtree: 1 }), rows = [], group = null, thread = null;
+  return rowsEl.forEach((r, i) => {
     let desc = r.children?.find((c) => c.role === "AXCell")?.desc ?? "";
     if (isGroupHeader2(desc)) {
-      group = desc.split(",")[0].trim();
-      continue;
+      group = desc.split(",")[0].trim(), thread = null;
+      return;
+    }
+    let count = expandedConversation2(desc);
+    if (count !== null) {
+      thread = { id: i, count, pos: 0 };
+      return;
     }
     let p = parseRowDesc2(desc);
-    if (p)
+    if (!p)
+      return;
+    if (thread && thread.pos < thread.count && !p.conversationCount)
+      rows.push({ ...p, group, h: r.h, thread: { ...thread, pos: thread.pos++ } });
+    else
       rows.push({ ...p, group, h: r.h });
-  }
-  return rows;
+  }), rows;
 }
 async function cellCount2() {
   let t = await ax2.findOne("main", { role: "AXTable", desc: "Message List" }, { depth: 8 });
@@ -31049,6 +31159,9 @@ async function loadRows2(want) {
     await ax2.set(bar.h, "AXValue", 0, "number").catch(() => {});
   return rows;
 }
+function encodeRef2(r) {
+  return "msg_" + Buffer.from(JSON.stringify(r)).toString("base64url");
+}
 function decodeRef2(ref) {
   try {
     let r = JSON.parse(Buffer.from(ref.replace(/^msg_/, ""), "base64url").toString());
@@ -31059,7 +31172,16 @@ function decodeRef2(ref) {
     throw new OutlookError2(`Invalid message ref "${ref.slice(0, 40)}…". Use refs returned by outlook_list_messages or outlook_search_messages.`);
   }
 }
-var previewKey2 = (preview) => preview.slice(0, 60), sameRow2 = (r, d) => r.subject === d.s && r.sender === d.n && r.date === d.d && previewKey2(r.preview) === d.p;
+var previewKey2 = (preview) => preview.slice(0, 60), sameRow2 = (r, d) => r.subject === d.s && r.sender === d.n && r.date === d.d && previewKey2(r.preview) === d.p, isConversation2 = (r) => (r.conversationCount ?? 0) >= 2, stripPrefixes2 = (x) => x.replace(/^((re|fw|fwd|aw|tr|wg)\s*:\s*)+/i, "").trim();
+function toSummaries2(rows, f, q) {
+  let seen = /* @__PURE__ */ new Map;
+  return rows.map((r, i) => {
+    let p = previewKey2(r.preview), c = isConversation2(r) ? r.conversationCount : void 0, key = `${r.subject}\x00${r.sender}\x00${r.date}\x00${p}\x00${c ? 1 : 0}`, k = seen.get(key) ?? 0;
+    seen.set(key, k + 1);
+    let { h, thread, ...rest } = r;
+    return { ref: encodeRef2({ v: 2, f, q, s: r.subject, n: r.sender, d: r.date, p, k, c }), index: i, ...rest };
+  });
+}
 async function searchField2() {
   return need("main", { role: "AXTextField", subrole: "AXSearchField", id: "Search Bar" }, "the search box", { depth: 3 });
 }
@@ -31075,18 +31197,41 @@ async function exitSearch2() {
       return;
   throw new OutlookError2("Could not leave Outlook's search results view.");
 }
-async function runSearch2(query) {
-  let field = await searchField2();
+async function runSearch2(query, enough = 1 / 0) {
+  let field = await searchField2(), folderList = await listSignature2();
   if (await ax2.set(field.h, "AXValue", query), await ax2.press(field.h, "AXConfirm"), !await until(async () => ((await ax2.get("main")).title ?? "").startsWith("Searching"), 6000))
     throw new OutlookError2("Outlook did not start the search.");
+  if (await until(async () => await listSignature2() !== folderList, 12000, 250), !await until(async () => await cellCount2() > 0, 8000, 300))
+    return;
+  let last = 0, since = Date.now();
   await until(async () => {
-    let t = await ax2.findOne("main", { role: "AXTable", desc: "Message List" }, { depth: 8 });
-    if (t) {
-      if ((await ax2.find(t.h, { role: "AXCell", descContains: "Sender:" }, { depth: 2, limit: 1 })).length)
-        return !0;
-    }
-    return !!await ax2.findOne("main", { descContains: "No Search Results" }, { depth: 12 });
-  }, 20000, 400), await waitListSettled2();
+    let n = await cellCount2();
+    if (n !== last)
+      last = n, since = Date.now();
+    return n >= enough + 2 || Date.now() - since > 2500;
+  }, 20000, 300), await waitListSettled2();
+}
+async function rowDesc2(h) {
+  return (await ax2.tree(h, 1).catch(() => null))?.children?.find((c) => c.role === "AXCell")?.desc ?? null;
+}
+async function expandConversation2(row) {
+  await ax2.set(row.h, "AXSelected", !0).catch(() => {}), await until(async () => expandedConversation2(await rowDesc2(row.h) ?? "") !== null, 4000, 200), await waitListSettled2();
+  let rows = await readRows2(await messageTable2()), opened = rows.find((r) => r.thread?.pos === 0 && r.thread.count === row.conversationCount && stripPrefixes2(r.subject) === stripPrefixes2(row.subject));
+  if (opened?.unread)
+    await restoreUnread2(opened).catch(() => !1);
+  return rows;
+}
+function shownMessage2(rows, d) {
+  let exact = rows.filter((r) => r.thread && r.date === d.d && previewKey2(r.preview) === d.p);
+  return exact.length ? exact : rows.filter((r) => r.thread?.pos === 0 && r.date === d.d && stripPrefixes2(r.subject) === stripPrefixes2(d.s));
+}
+function candidates2(rows, data) {
+  let same = rows.filter((r) => sameRow2(r, data)), singles = same.filter((r) => !isConversation2(r)), convs = same.filter(isConversation2);
+  if (!data.c)
+    return singles.length ? singles : convs;
+  if (convs.length)
+    return convs;
+  return shownMessage2(rows, data);
 }
 async function locate2(ref) {
   let data = decodeRef2(ref);
@@ -31094,18 +31239,60 @@ async function locate2(ref) {
   let title = (await ax2.get("main")).title ?? "", field = data.q ? await ax2.findOne("main", { role: "AXTextField", subrole: "AXSearchField", id: "Search Bar" }, { depth: 3 }) : null;
   if (!(!!data.q && title.startsWith("Searching") && field?.value === data.q)) {
     if (await openFolder2(data.f), data.q)
-      await runSearch2(data.q);
+      await runSearch2(data.q, 25);
   }
-  let want = 25;
-  for (let i = 0;i < 6; i++) {
-    let rows = await loadRows2(want), matches = rows.filter((r) => sameRow2(r, data)), row = matches[data.k];
-    if (row)
-      return { row, data, matches: matches.length };
-    if (rows.length < want)
+  let pick2 = (rows2) => {
+    let matches = candidates2(rows2, data), row = matches[data.k] ?? (data.q ? matches[matches.length - 1] : void 0);
+    return row ? { row, data, matches: matches.length } : null;
+  }, rows = [], want = 25;
+  for (let i = 0;i < 8; i++) {
+    rows = await loadRows2(want);
+    let hit = pick2(rows);
+    if (hit)
+      return hit;
+    if (rows.length >= want) {
+      want *= 3;
+      continue;
+    }
+    if (!data.q)
       break;
-    want *= 3;
+    let n = await cellCount2();
+    if (!await until(async () => await cellCount2() > n ? !0 : null, 4000, 300))
+      break;
   }
-  throw new OutlookError2(`Message "${data.s}" from ${data.n} (${data.d}) is no longer in "${data.f}". List the folder again to get a fresh ref.`);
+  if (!data.c) {
+    let hidden = (r) => isConversation2(r) && stripPrefixes2(r.subject) === stripPrefixes2(data.s);
+    for (let i = 0;i < 3; i++) {
+      let conv = rows.find(hidden);
+      if (!conv)
+        break;
+      rows = await expandConversation2(conv);
+      let hit = pick2(rows);
+      if (hit)
+        return hit;
+    }
+  }
+  throw new OutlookError2(`Message "${data.s}" from ${data.n} (${data.d}) is no longer in "${data.f}"${data.q ? ` (search "${data.q}")` : ""}. List or search again to get a fresh ref.`);
+}
+async function openMessage2(ref, opts = {}) {
+  for (let attempt = 0;; attempt++) {
+    let loc = await locate2(ref), { row } = loc, conversation;
+    if (isConversation2(row) || loc.data.c && row.thread) {
+      let rows = isConversation2(row) ? await expandConversation2(row) : await readRows2(await messageTable2()), shown = isConversation2(row) ? shownMessage2(rows, { s: row.subject, d: row.date, p: previewKey2(row.preview) })[0] : row, all = toSummaries2(rows, loc.data.f, loc.data.q);
+      if (conversation = shown?.thread ? all.filter((_, i) => rows[i].thread?.id === shown.thread.id) : [], opts.single || !shown) {
+        let members2 = conversation.map((m) => `
+- ${m.ref}: ${m.sender}, ${m.date}${m.folder ? `, in ${m.folder}` : ""}`).join("");
+        throw new OutlookError2(`This ref is a conversation of ${row.conversationCount ?? row.thread?.count} messages${members2 ? "; use the ref of one of its messages:" + members2 : ". Outlook has expanded it: list the folder again and use the ref of the specific message."}`);
+      }
+      row = shown;
+    }
+    try {
+      return await selectRow2(row), { ...loc, row, conversation };
+    } catch (e) {
+      if (attempt >= 1)
+        throw e;
+    }
+  }
 }
 async function headerInfo2() {
   let header = await ax2.findOne("main", { id: "HeaderMainContainer" }, { depth: 7, subtree: 3 }), subject = null, from = null;
@@ -31123,7 +31310,7 @@ async function headerInfo2() {
 }
 async function selectRow2(row) {
   await ax2.set(row.h, "AXSelected", !0);
-  let norm = (x) => x.replace(/^((re|fw|fwd|aw|tr|wg)\s*:\s*)+/i, "").trim(), matchesSubject = (s) => s !== null && (s === row.subject || norm(s) === norm(row.subject) || row.subject === "" && /^[(<]?no subject[)>]?$/i.test(s));
+  let norm = stripPrefixes2, matchesSubject = (s) => s !== null && (s === row.subject || norm(s) === norm(row.subject) || row.subject === "" && /^[(<]?no subject[)>]?$/i.test(s));
   if (!await until(async () => {
     if (!(await ax2.get(row.h).catch(() => null))?.selected)
       return !1;
@@ -31137,6 +31324,17 @@ async function selectRow2(row) {
     return h.from.includes(row.sender.split(",")[0].trim());
   }, 6000, 150))
     throw new OutlookError2(`Outlook did not show message "${row.subject}" in the reading pane.`);
+}
+async function rowUnread2(row) {
+  let desc = await rowDesc2(row.h);
+  return desc ? parseRowDesc2(desc)?.unread ?? null : null;
+}
+async function restoreUnread2(row) {
+  if (!await until(async () => await rowUnread2(row) === !1 ? !0 : null, 2500, 250))
+    return await rowUnread2(row) !== !1;
+  return await withFocus(async () => {
+    await ax2.menu(["Message", "Toggle Unread"]);
+  }), !!await until(async () => await rowUnread2(row) === !0 ? !0 : null, 3000, 250);
 }
 var DOWNLOADS2 = join3(homedir2(), "Downloads");
 
@@ -31236,8 +31434,7 @@ async function createDraft(d) {
   });
 }
 async function respondDraft(ref, kind, body, opts = {}) {
-  let { row } = await locate2(ref);
-  await selectRow2(row);
+  await openMessage2(ref);
   let menuItem = { reply: "Reply", replyAll: "Reply All", forward: "Forward" }[kind];
   return withFocus(async () => {
     let before = await secondaryWindows();
@@ -31411,7 +31608,7 @@ async function goToWeek(date6) {
   }
   throw new OutlookError2("Could not navigate the calendar to the requested date.");
 }
-var encodeRef2 = (r) => "evt_" + Buffer.from(JSON.stringify(r)).toString("base64url");
+var encodeRef3 = (r) => "evt_" + Buffer.from(JSON.stringify(r)).toString("base64url");
 function decodeRef3(ref) {
   try {
     let r = JSON.parse(Buffer.from(ref.replace(/^evt_/, ""), "base64url").toString());
@@ -31465,9 +31662,9 @@ async function closePeek(popover) {
   await ax2.press(popover.h, "AXCancel").catch(() => {});
 }
 function toEvent(btn, p, k) {
-  let f = p.fields, dateText = f.dateField ?? "", dates = [...dateText.matchAll(/(?:\w+day, )?(\d{1,2} [A-Za-z]+ \d{4}|[A-Za-z]+ \d{1,2}, \d{4})/g)].map((m) => parseLongDate(m[1])).filter(Boolean), times = parseTimes(f.timeField ?? "") ?? parseTimes(dateText), first = dates[0] ? ymd(dates[0]) : btn.day ?? "", allDay = btn.allDay && !times, subject = f.subjectField ?? btn.label.split(", ")[0] ?? "", response = p.flat.find((n) => n.role === "AXStaticText" && /^You (have|accepted|declined|tentatively|are the organizer)/i.test(n.value ?? ""))?.value ?? null, names = p.flat.filter((n) => n.role === "AXButton" && n.children?.some((c) => c.role === "AXImage")).map((n) => n.desc ?? "").filter(Boolean);
+  let f = p.fields, dateText = f.dateField ?? [f.startDateField ?? f.allDayStartDateField, f.endDateField ?? f.allDayEndDateField].filter(Boolean).join(" - "), dates = [...dateText.matchAll(/(?:\w+day, )?(\d{1,2} [A-Za-z]+ \d{4}|[A-Za-z]+ \d{1,2}, \d{4})/g)].map((m) => parseLongDate(m[1])).filter(Boolean), times = parseTimes(f.timeField ?? "") ?? parseTimes(dateText) ?? (f.startTimeField && f.endTimeField ? { start: to24(f.startTimeField), end: to24(f.endTimeField) } : null), first = dates[0] ? ymd(dates[0]) : btn.day ?? "", allDay = btn.allDay && !times, subject = f.subjectField ?? btn.label.split(", ")[0] ?? "", response = p.flat.find((n) => n.role === "AXStaticText" && /^You (have|accepted|declined|tentatively|are the organizer)/i.test(n.value ?? ""))?.value ?? null, names = p.flat.filter((n) => n.role === "AXButton" && n.children?.some((c) => c.role === "AXImage")).map((n) => n.desc ?? "").filter(Boolean);
   return {
-    ref: encodeRef2({ v: 1, d: first, s: subject, t: allDay ? "" : times?.start ?? "", k }),
+    ref: encodeRef3({ v: 1, d: first, s: subject, t: allDay ? "" : times?.start ?? "", k }),
     subject,
     date: first,
     endDate: dates[1] ? ymd(dates[1]) : null,
@@ -31548,16 +31745,16 @@ async function listEvents(opts) {
       await restore();
   }
 }
-async function candidates(data) {
+async function candidates3(data) {
   return (await gridButtons()).filter((b) => b.label.startsWith(data.s) && (b.allDay || !b.day || b.day === data.d));
 }
 var isRefEvent = (ev, data) => ev.subject === data.s && (ev.start ?? "") === data.t && (ev.date === data.d || !!ev.endDate && ev.date <= data.d && data.d <= ev.endDate);
 async function locateEvent(ref) {
   let data = decodeRef3(ref);
   await goToWeek(parseYmd(data.d)), await sleep(400);
-  let n = (await candidates(data)).length, k = 0;
+  let n = (await candidates3(data)).length, k = 0;
   for (let i = 0;i < n; i++) {
-    let b = (await candidates(data))[i], p = b ? await peek(b) : null;
+    let b = (await candidates3(data))[i], p = b ? await peek(b) : null;
     if (!b || !p)
       continue;
     let ev = toEvent(b, p, 0);
@@ -31571,7 +31768,7 @@ async function locateEvent(ref) {
       async open() {
         for (let attempt = 0;attempt < 3; attempt++) {
           await sleep(300);
-          let btn = (await candidates(data))[index], pk = btn ? await peek(btn) : null;
+          let btn = (await candidates3(data))[index], pk = btn ? await peek(btn) : null;
           if (btn && pk) {
             if (isRefEvent(toEvent(btn, pk, 0), data))
               return { btn, p: pk };
@@ -31594,7 +31791,7 @@ async function getEvent(ref, opts = {}) {
       await ax2.press(openBtn.h);
     else
       await ax2.press((btn.inner ?? btn.outer).h, "Open event");
-    let win = await until(async () => (await secondaryWindows()).find((w) => !before.some((b) => b.title === w.title)) ?? null, 6000);
+    let win = await until(() => newWindow(before), 6000);
     if (!win)
       throw new OutlookError2("The event window did not open.");
     try {
@@ -31627,19 +31824,27 @@ function parseLocal(s) {
     throw new OutlookError2(`Invalid date/time "${s}"; use e.g. 2026-11-20T10:00.`);
   return d;
 }
+var hm = (d) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+async function readDateField(win, title) {
+  let v = (await ax2.findOne(win.h, { role: "AXDateTimeArea", title }, { depth: 6 }))?.value;
+  return v ? new Date(v) : null;
+}
 async function setDateField(win, title, d) {
-  let f = await ax2.findOne(win.h, { role: "AXDateTimeArea", title }, { depth: 6 });
-  if (!f)
-    return !1;
-  if (await ax2.call("set", { h: f.h, attr: "AXValue", value: d.toISOString().replace(/\.\d{3}Z$/, "Z"), type: "date" }), !await until(async () => {
-    let v = (await ax2.get(f.h)).value;
-    if (!v)
-      return !1;
-    let got = new Date(v);
-    return /date/i.test(title) ? ymd(got) === ymd(d) : got.getHours() === d.getHours() && got.getMinutes() === d.getMinutes();
-  }, 2000, 150))
-    throw new OutlookError2(`Outlook did not accept ${title} = ${d.toString()}.`);
-  return !0;
+  let isDate = /date/i.test(title), same = (got2) => !!got2 && (isDate ? ymd(got2) === ymd(d) : hm(got2) === hm(d)), got = null;
+  for (let attempt = 0;attempt < 3; attempt++) {
+    let f = await ax2.findOne(win.h, { role: "AXDateTimeArea", title }, { depth: 6 });
+    if (!f?.value) {
+      if (!f)
+        return !1;
+      await sleep(300);
+      continue;
+    }
+    let cur = new Date(f.value), value = isDate ? new Date(d.getFullYear(), d.getMonth(), d.getDate(), cur.getHours(), cur.getMinutes()) : new Date(cur.getFullYear(), cur.getMonth(), cur.getDate(), d.getHours(), d.getMinutes());
+    if (await ax2.call("set", { h: f.h, attr: "AXValue", value: value.toISOString().replace(/\.\d{3}Z$/, "Z"), type: "date" }), await until(async () => same(got = await readDateField(win, title)), 2000, 150))
+      return !0;
+  }
+  let shown = got ? isDate ? ymd(got) : hm(got) : "nothing";
+  throw new OutlookError2(`Outlook did not accept ${title} = ${isDate ? ymd(d) : hm(d)} (the field shows ${shown}).`);
 }
 async function chooseCalendar(win, cal) {
   let picker = await need(win.h, { role: "AXPopUpButton", descRegex: ", From$" }, "the calendar picker", { depth: 4 });
@@ -31708,16 +31913,18 @@ async function fillForm(win, input2, isNew) {
     throw new OutlookError2("The event form has no All day switch.");
   if (input2.start) {
     let s = parseLocal(input2.start);
-    if (!await ax2.findOne(win.h, { role: "AXDateTimeArea", title: "Start date" }, { depth: 6 }))
+    if (!await until(() => readDateField(win, "Start date"), 4000, 200))
       throw new OutlookError2("The event form has no Start date field.");
     if (await setDateField(win, "Start date", s), !allDay)
       await setDateField(win, "Start time", s);
     await sleep(250);
   }
   if (input2.end) {
-    let e = parseLocal(input2.end), s = input2.start ? parseLocal(input2.start) : null;
+    let e = parseLocal(input2.end), formStart = await until(() => readDateField(win, "Start date"), 4000, 200), startTime = allDay ? null : await readDateField(win, "Start time"), s = formStart && new Date(formStart.getFullYear(), formStart.getMonth(), formStart.getDate(), startTime?.getHours() ?? 0, startTime?.getMinutes() ?? 0);
+    if (s && (allDay ? ymd(e) < ymd(s) : e <= s))
+      throw new OutlookError2(`end (${input2.end}) must be after the event's start (${ymd(s)}${allDay ? "" : " " + hm(s)}).${input2.start ? "" : " Pass start as well to move the event."}`);
     if (!await setDateField(win, "End date", e) && s && ymd(s) !== ymd(e) && !allDay)
-      throw new OutlookError2("Outlook's form has no End date field for timed events; multi-day timed events are not supported.");
+      throw new OutlookError2(`end (${input2.end}) is on another day than the event's start (${ymd(s)}), and Outlook's form has no End date field for timed events: multi-day timed events are not supported.${input2.start ? "" : " Pass start as well to move the event."}`);
     if (!allDay)
       await setDateField(win, "End time", e);
     await sleep(250);
@@ -31758,6 +31965,7 @@ async function checkLocation(win, location) {
   if (loc && location.trim() && v !== location.trim() && !v.includes("￼"))
     throw new OutlookError2(`The location field reads "${loc.value ?? ""}" instead of "${location}".`);
 }
+var windowGone = async (win) => !(await ax2.get(win.h).catch(() => null))?.role;
 async function saveForm(win) {
   let save = await ax2.findOne(win.h, { role: "AXButton", descRegex: "^Save(,|$)" }, { depth: 3 });
   if (!save) {
@@ -31765,15 +31973,21 @@ async function saveForm(win) {
       throw new OutlookError2("This event has attendees, so Outlook would send invitations/updates. The server only saves events without notifying anyone; the form was left open.");
     throw new OutlookError2("Could not find the event's Save button.");
   }
-  await ax2.press(save.h);
-  let prompt = await ax2.waitFor(win.h, { role: "AXSheet" }, { timeoutMs: 1200, depth: 1 }).catch(() => null);
-  if (prompt?.ok && prompt.node) {
-    let occ = (await ax2.find(prompt.node.h, { role: "AXButton" }, { depth: 2 })).find((b) => /occurrence|this event/i.test(b.title ?? ""));
-    if (occ)
-      await ax2.press(occ.h);
+  for (let attempt = 0;attempt < 3; attempt++) {
+    await bringToFront();
+    let btn = attempt ? await ax2.findOne(win.h, { role: "AXButton", descRegex: "^Save(,|$)" }, { depth: 3 }).catch(() => null) : save;
+    if (btn)
+      await ax2.press(btn.h).catch(() => {});
+    let prompt = await ax2.waitFor(win.h, { role: "AXSheet" }, { timeoutMs: 1200, depth: 1 }).catch(() => null);
+    if (prompt?.ok && prompt.node) {
+      let occ = (await ax2.find(prompt.node.h, { role: "AXButton" }, { depth: 2 })).find((b) => /occurrence|this event/i.test(b.title ?? ""));
+      if (occ)
+        await ax2.press(occ.h);
+    }
+    if (await until(() => windowGone(win), attempt ? 8000 : 4000))
+      return;
   }
-  if (!await until(async () => !(await secondaryWindows()).some((w) => w.title === win.title || w.h === win.h), 8000))
-    throw new OutlookError2("The event window did not close after saving; check Outlook for a validation message.");
+  throw new OutlookError2("The event window did not close after saving, so the event was not saved; check Outlook for a validation message.");
 }
 async function waitForTile(day, subject) {
   await goToWeek(day);
@@ -31781,16 +31995,33 @@ async function waitForTile(day, subject) {
   return !!await until(async () => (await gridButtons()).some((b) => b.label.startsWith(subject) && (b.allDay || b.day === d)), 8000, 400);
 }
 async function discardForm(win) {
-  let close = await ax2.findOne(win.h, { role: "AXButton", descRegex: "^(Discard|Close)(,|$)" }, { depth: 3 }).catch(() => null) ?? await ax2.findOne(win.h, { subrole: "AXCloseButton" }, { depth: 1 }).catch(() => null);
-  if (!close)
-    return;
-  await ax2.press(close.h).catch(() => {});
-  let sheet = await ax2.waitFor(win.h, { role: "AXSheet" }, { timeoutMs: 1500, depth: 1 }).catch(() => null);
-  if (sheet?.ok && sheet.node) {
-    let btn = await ax2.findOne(sheet.node.h, { role: "AXButton", titleRegex: "^(Discard|Don.t Save|Delete)" }, { depth: 2 });
-    if (btn)
-      await ax2.press(btn.h).catch(() => {});
+  let gone = () => windowGone(win);
+  for (let attempt = 0;attempt < 2 && !await gone(); attempt++) {
+    await bringToFront().catch(() => {});
+    let sheet = await ax2.findOne(win.h, { role: "AXSheet" }, { depth: 1 }).catch(() => null);
+    if (!sheet) {
+      let close = await ax2.findOne(win.h, { role: "AXButton", descRegex: "^(Discard|Close)(,|$)" }, { depth: 3 }).catch(() => null) ?? await ax2.findOne(win.h, { subrole: "AXCloseButton" }, { depth: 1 }).catch(() => null);
+      if (close)
+        await ax2.press(close.h).catch(() => {});
+      sheet = (await ax2.waitFor(win.h, { role: "AXSheet" }, { timeoutMs: 1500, depth: 1 }).catch(() => null))?.node ?? null;
+    }
+    if (sheet) {
+      let btn = await ax2.findOne(sheet.h, { role: "AXButton", titleRegex: "^(Discard|Don.t Save|Delete)" }, { depth: 2 }).catch(() => null);
+      if (btn)
+        await ax2.press(btn.h).catch(() => {});
+    }
+    if (await until(gone, 3000, 200))
+      return !0;
   }
+  return gone();
+}
+async function abandonForm(win, e) {
+  if (e instanceof OutlookError2 && /attendees/.test(e.message))
+    throw e;
+  if (await discardForm(win))
+    throw e;
+  let note = ` Its window ("${(await ax2.get(win.h).catch(() => null))?.title ?? win.title ?? ""}") is still open with unsaved changes: close it without saving before retrying, or the event may end up duplicated.`;
+  throw e instanceof OutlookError2 ? new OutlookError2(e.message + note) : e;
 }
 async function createEvent(input2) {
   if (!input2.end && !input2.allDay)
@@ -31800,7 +32031,7 @@ async function createEvent(input2) {
   return withFocus(async () => {
     let before = await secondaryWindows(), newBtn = await need("main", { role: "AXButton", descRegex: "^New Event(,|$)" }, "the New Event button", { depth: 2 });
     await ax2.press(newBtn.h);
-    let win = await until(async () => (await secondaryWindows()).find((w) => (w.title ?? "").startsWith("New Event") && !before.some((b) => b.title === w.title)) ?? null, 8000);
+    let win = await until(() => newWindow(before, (w) => (w.title ?? "").startsWith("New Event")), 8000);
     if (!win)
       throw new OutlookError2("The New Event window did not open.");
     try {
@@ -31811,13 +32042,11 @@ async function createEvent(input2) {
       return {
         created: !0,
         verified: await waitForTile(s, input2.subject),
-        ref: encodeRef2({ v: 1, d: ymd(s), s: input2.subject, t: input2.allDay ? "" : `${String(s.getHours()).padStart(2, "0")}:${String(s.getMinutes()).padStart(2, "0")}`, k: 0 }),
+        ref: encodeRef3({ v: 1, d: ymd(s), s: input2.subject, t: input2.allDay ? "" : hm(s), k: 0 }),
         calendar: cal.length >= 3 ? `${cal[2]}/${cal[1]}` : null
       };
     } catch (e) {
-      if (!(e instanceof OutlookError2 && /attendees/.test(e.message)))
-        await discardForm(win);
-      throw e;
+      return abandonForm(win, e);
     }
   });
 }
@@ -31831,7 +32060,7 @@ async function updateEvent(ref, changes) {
     let occ = await ax2.waitFor("app", { role: "AXButton", titleRegex: "(?i)(this event|this occurrence|^Occurrence)" }, { timeoutMs: 1500, depth: 6 }).catch(() => null);
     if (occ?.ok && occ.node)
       await ax2.press(occ.node.h);
-    let win = await until(async () => (await secondaryWindows()).find((w) => !before.some((b) => b.title === w.title)) ?? null, 8000);
+    let win = await until(() => newWindow(before), 8000);
     if (!win)
       throw new OutlookError2("The event editor did not open.");
     try {
@@ -31839,19 +32068,17 @@ async function updateEvent(ref, changes) {
       let title = (await ax2.get(win.h)).title ?? "";
       await saveForm({ ...win, title });
     } catch (e) {
-      if (!(e instanceof OutlookError2 && /attendees/.test(e.message)))
-        await discardForm(win);
-      throw e;
+      await abandonForm(win, e);
     }
     let s = changes.start ? parseLocal(changes.start) : null, allDay = changes.allDay ?? data.t === "";
     return {
       updated: !0,
       verified: await waitForTile(s ?? parseYmd(data.d), changes.subject ?? data.s),
-      ref: encodeRef2({
+      ref: encodeRef3({
         v: 1,
         d: s ? ymd(s) : data.d,
         s: changes.subject ?? data.s,
-        t: allDay ? "" : s ? `${String(s.getHours()).padStart(2, "0")}:${String(s.getMinutes()).padStart(2, "0")}` : data.t,
+        t: allDay ? "" : s ? hm(s) : data.t,
         k: 0
       })
     };
@@ -35488,18 +35715,18 @@ function _handleAddress(tokens, from, to) {
       addressParts.push(stripped.address);
   }
   if (data.address = addressParts, !data.address.length && data.text.length && !textFromComment) {
-    let candidates2 = data.text.map((part) => collapseAtSpacing(part));
+    let candidates4 = data.text.map((part) => collapseAtSpacing(part));
     for (i = 0;i < data.text.length; i++) {
       let local = data.quotedLocalAt[i], quotedLocal = data.textWasQuoted[i] && local >= 0 && QUOTED_LOCAL_DOMAIN.test(data.text[i].slice(local)) ? quoteLocalPart(data.text[i]) : "";
-      if (quotedLocal || !data.textWasQuoted[i] && isAddrSpec(candidates2[i])) {
-        data.address = [quotedLocal || candidates2[i]], data.text.splice(i, 1), data.textWasQuoted.splice(i, 1), data.quotedLocalAt.splice(i, 1);
+      if (quotedLocal || !data.textWasQuoted[i] && isAddrSpec(candidates4[i])) {
+        data.address = [quotedLocal || candidates4[i]], data.text.splice(i, 1), data.textWasQuoted.splice(i, 1), data.quotedLocalAt.splice(i, 1);
         break;
       }
     }
     if (!data.address.length) {
       for (i = 0;i < data.text.length; i++)
         if (!data.textWasQuoted[i]) {
-          let part = candidates2[i], start = looseAddressStart(part);
+          let part = candidates4[i], start = looseAddressStart(part);
           if (start >= 0) {
             LOOSE_TEXT_ADDR.lastIndex = start;
             let match = LOOSE_TEXT_ADDR.exec(part);
@@ -36496,7 +36723,7 @@ function conventionsInstructions(c) {
 // package.json
 var package_default = {
   name: "axlook-mcp",
-  version: "0.2.0",
+  version: "0.2.1",
   description: "MCP server for New Outlook for Mac: mail, drafts and calendars through macOS Accessibility, no Graph API or tokens",
   keywords: [
     "mcp",

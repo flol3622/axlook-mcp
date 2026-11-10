@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseRowDesc } from "../src/outlook/mail";
+import { expandedConversation, parseRowDesc } from "../src/outlook/mail";
 import { parseLongDate, parseRange, ymd } from "../src/outlook/calendar";
 
 // Row descriptions captured from New Outlook 16.114.
@@ -74,6 +74,18 @@ describe("parseRowDesc", () => {
 
   test("group header is not a message", () => {
     expect(parseRowDesc("Yesterday, Expanded")).toBeNull();
+  });
+});
+
+describe("expandedConversation", () => {
+  test("header of an expanded conversation", () => {
+    const header = "  Expanded, Conversation, 3 messages,  Subject: Abstract submission,   Latest message:  26/06/2026, Folder: Inbox,  ";
+    expect(expandedConversation(header)).toBe(3);
+    expect(parseRowDesc(header)).toBeNull();
+  });
+  test("collapsed conversations and group headers are not", () => {
+    expect(expandedConversation("   Conversation, 5 messages, Sender: Dirk Peeters, Subject: Abstract submission,   Latest message:  23/09/2026, ")).toBeNull();
+    expect(expandedConversation("Top Results, Expanded")).toBeNull();
   });
 });
 

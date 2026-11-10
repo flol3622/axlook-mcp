@@ -208,6 +208,8 @@ export interface MessageSummary {
 
 interface RowInfo extends Omit<MessageSummary, "ref" | "index"> {
   h: string;
+  /** Set on the messages of an expanded conversation: `id` tells conversations apart, `pos` 0 is the newest. */
+  thread?: { id: number; count: number; pos: number };
 }
 
 const DATE_RE = /(\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}|\d{1,2}:\d{2}(?: ?[AP]M)?|Yesterday|Today|(?:Mon|Tues|Wednes|Thurs|Fri|Satur|Sun)day(?: \d{1,2}[/.-]\d{1,2})?|(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{1,2}[/.-]\d{1,2})/;
@@ -267,14 +269,20 @@ async function messageTable(): Promise<AxNode> {
   return need("main", { role: "AXTable", desc: "Message List" }, "the message list", { depth: 8, timeoutMs: 4000 });
 }
 
+/** A fingerprint of the top of the message list, to notice when it re-renders. */
+async function listSignature(): Promise<string | null> {
+  const t = await ax.findOne("main", { role: "AXTable", desc: "Message List" }, { depth: 8 });
+  if (!t) return null;
+  const cells = await ax.find(t.h, { role: "AXCell" }, { depth: 2, limit: 6 });
+  return cells.map((c) => c.desc ?? "").join("|") + `#${cells.length}`;
+}
+
 async function waitListSettled() {
   // The list re-renders after a folder switch or search; wait until two consecutive reads agree.
   let last = "";
   await until(async () => {
-    const t = await ax.findOne("main", { role: "AXTable", desc: "Message List" }, { depth: 8 });
-    if (!t) return false;
-    const cells = await ax.find(t.h, { role: "AXCell" }, { depth: 2, limit: 6 });
-    const sig = cells.map((c) => c.desc ?? "").join("|") + `#${cells.length}`;
+    const sig = await listSignature();
+    if (sig === null) return false;
     const stable = sig === last;
     last = sig;
     return stable;
@@ -285,20 +293,36 @@ function isGroupHeader(desc: string) {
   return /^[^,]+, (Expanded|Collapsed)$/.test(desc.trim());
 }
 
+/** The header row of an expanded conversation ("Expanded, Conversation, 3 messages, Subject: …"): its message count. */
+export function expandedConversation(desc: string): number | null {
+  const m = desc.match(/^\s*Expanded, Conversation, (\d+) messages?,/);
+  return m ? Number(m[1]) : null;
+}
+
 async function readRows(table: AxNode): Promise<RowInfo[]> {
   // AXRows lists every loaded row; AXChildren only those currently built around the viewport.
   const rowsEl = await ax.call<AxNode[]>("elements", { h: table.h, attr: "AXRows", subtree: 1 });
   const rows: RowInfo[] = [];
   let group: string | null = null;
-  for (const r of rowsEl) {
+  let thread: { id: number; count: number; pos: number } | null = null;
+  rowsEl.forEach((r, i) => {
     const desc = r.children?.find((c) => c.role === "AXCell")?.desc ?? "";
     if (isGroupHeader(desc)) {
       group = desc.split(",")[0]!.trim();
-      continue;
+      thread = null;
+      return;
+    }
+    // An expanded conversation is a header row followed by its messages, newest first.
+    const count = expandedConversation(desc);
+    if (count !== null) {
+      thread = { id: i, count, pos: 0 };
+      return;
     }
     const p = parseRowDesc(desc);
-    if (p) rows.push({ ...p, group, h: r.h });
-  }
+    if (!p) return;
+    if (thread && thread.pos < thread.count && !p.conversationCount) rows.push({ ...p, group, h: r.h, thread: { ...thread, pos: thread.pos++ } });
+    else rows.push({ ...p, group, h: r.h });
+  });
   return rows;
 }
 
@@ -347,6 +371,7 @@ interface RefData {
   d: string; // date label
   p: string; // start of the preview, to tell apart same-subject rows
   k: number; // occurrence among identical rows
+  c?: number; // message count, when the row is a conversation
 }
 
 function encodeRef(r: RefData) {
@@ -366,16 +391,20 @@ function decodeRef(ref: string): RefData {
 const previewKey = (preview: string) => preview.slice(0, 60);
 const sameRow = (r: RowInfo, d: { s: string; n: string; d: string; p: string }) =>
   r.subject === d.s && r.sender === d.n && r.date === d.d && previewKey(r.preview) === d.p;
+const isConversation = (r: { conversationCount: number | null }) => (r.conversationCount ?? 0) >= 2;
+const stripPrefixes = (x: string) => x.replace(/^((re|fw|fwd|aw|tr|wg)\s*:\s*)+/i, "").trim();
 
 function toSummaries(rows: RowInfo[], f: string, q?: string): MessageSummary[] {
   const seen = new Map<string, number>();
   return rows.map((r, i) => {
     const p = previewKey(r.preview);
-    const key = `${r.subject}\u0000${r.sender}\u0000${r.date}\u0000${p}`;
+    const c = isConversation(r) ? r.conversationCount! : undefined;
+    // Conversations are counted apart from single messages, as locate() matches them apart.
+    const key = `${r.subject}\u0000${r.sender}\u0000${r.date}\u0000${p}\u0000${c ? 1 : 0}`;
     const k = seen.get(key) ?? 0;
     seen.set(key, k + 1);
-    const { h, ...rest } = r;
-    return { ref: encodeRef({ v: 2, f, q, s: r.subject, n: r.sender, d: r.date, p, k }), index: i, ...rest };
+    const { h, thread, ...rest } = r;
+    return { ref: encodeRef({ v: 2, f, q, s: r.subject, n: r.sender, d: r.date, p, k, c }), index: i, ...rest };
   });
 }
 
@@ -408,21 +437,32 @@ async function exitSearch() {
   throw new OutlookError("Could not leave Outlook's search results view.");
 }
 
-async function runSearch(query: string) {
+/**
+ * Run a search and wait for its results. They arrive in batches over several seconds and nothing in the UI
+ * tells "still searching" from "no results", so wait for the first rows, then until `enough` rows are
+ * there or the list has stopped growing.
+ */
+async function runSearch(query: string, enough = Infinity) {
   const field = await searchField();
+  const folderList = await listSignature();
   await ax.set(field.h, "AXValue", query);
   await ax.press(field.h, "AXConfirm");
   const ok = await until(async () => ((await ax.get("main")).title ?? "").startsWith("Searching"), 6000);
   if (!ok) throw new OutlookError("Outlook did not start the search.");
-  // Results arrive after a few seconds: wait for rows or for Outlook's "No Search Results" placeholder.
+  // The folder's own messages stay listed until the first results (or an empty list) replace them.
+  await until(async () => (await listSignature()) !== folderList, 12_000, 250);
+  if (!(await until(async () => (await cellCount()) > 0, 8000, 300))) return;
+  let last = 0;
+  let since = Date.now();
   await until(async () => {
-    const t = await ax.findOne("main", { role: "AXTable", desc: "Message List" }, { depth: 8 });
-    if (t) {
-      const cells = await ax.find(t.h, { role: "AXCell", descContains: "Sender:" }, { depth: 2, limit: 1 });
-      if (cells.length) return true;
+    const n = await cellCount();
+    if (n !== last) {
+      last = n;
+      since = Date.now();
     }
-    return !!(await ax.findOne("main", { descContains: "No Search Results" }, { depth: 12 }));
-  }, 20_000, 400);
+    // Two group headers ("Top Results", "All Results") are rows too.
+    return n >= enough + 2 || Date.now() - since > 2500;
+  }, 20_000, 300);
   await waitListSettled();
 }
 
@@ -441,7 +481,7 @@ async function defaultScope(): Promise<string> {
 export async function searchMessages(opts: { query: string; folder?: string; limit?: number }) {
   const scope = opts.folder ?? (await defaultScope());
   const folder = await openFolder(scope);
-  await runSearch(opts.query);
+  await runSearch(opts.query, opts.limit ?? 25);
   const rows = await loadRows(opts.limit ?? 25);
   const title = (await ax.get("main")).title ?? "";
   return {
@@ -457,6 +497,45 @@ interface Located {
   matches: number;
 }
 
+async function rowDesc(h: string): Promise<string | null> {
+  const t = await ax.tree(h, 1).catch(() => null);
+  return t?.children?.find((c) => c.role === "AXCell")?.desc ?? null;
+}
+
+/**
+ * Expand a conversation row. Selecting it is what expands it; Outlook then opens (and selects) its newest
+ * message, so put that message's unread state back.
+ */
+async function expandConversation(row: RowInfo): Promise<RowInfo[]> {
+  await ax.set(row.h, "AXSelected", true).catch(() => {});
+  await until(async () => expandedConversation((await rowDesc(row.h)) ?? "") !== null, 4000, 200);
+  await waitListSettled();
+  const rows = await readRows(await messageTable());
+  const opened = rows.find((r) => r.thread?.pos === 0 && r.thread.count === row.conversationCount && stripPrefixes(r.subject) === stripPrefixes(row.subject));
+  if (opened?.unread) await restoreUnread(opened).catch(() => false);
+  return rows;
+}
+
+/**
+ * A collapsed conversation row shows the date and preview of one of its messages (the newest, or in search
+ * results the one that matched) under the conversation's topic and participants: find that message once
+ * the conversation is expanded.
+ */
+function shownMessage(rows: RowInfo[], d: { s: string; d: string; p: string }): RowInfo[] {
+  const exact = rows.filter((r) => r.thread && r.date === d.d && previewKey(r.preview) === d.p);
+  return exact.length ? exact : rows.filter((r) => r.thread?.pos === 0 && r.date === d.d && stripPrefixes(r.subject) === stripPrefixes(d.s));
+}
+
+/** The rows a ref can stand for, and the collapsed conversations that may hide its message. */
+function candidates(rows: RowInfo[], data: RefData): RowInfo[] {
+  const same = rows.filter((r) => sameRow(r, data));
+  const singles = same.filter((r) => !isConversation(r));
+  const convs = same.filter(isConversation);
+  if (!data.c) return singles.length ? singles : convs; // refs made before `c` existed may be conversations
+  if (convs.length) return convs;
+  return shownMessage(rows, data); // already expanded
+}
+
 /** Navigate to the list a ref came from and return the matching row. */
 async function locate(ref: string): Promise<Located> {
   const data = decodeRef(ref);
@@ -467,31 +546,82 @@ async function locate(ref: string): Promise<Located> {
   const sameSearch = !!data.q && title.startsWith("Searching") && field?.value === data.q;
   if (!sameSearch) {
     await openFolder(data.f);
-    if (data.q) await runSearch(data.q);
+    if (data.q) await runSearch(data.q, 25);
   }
+  const pick = (rows: RowInfo[]): Located | null => {
+    const matches = candidates(rows, data);
+    // Search results repeat a message under "Top Results" and regroup while they load: any identical row will do.
+    const row = matches[data.k] ?? (data.q ? matches[matches.length - 1] : undefined);
+    return row ? { row, data, matches: matches.length } : null;
+  };
+  let rows: RowInfo[] = [];
   let want = 25;
-  for (let i = 0; i < 6; i++) {
-    const rows = await loadRows(want);
-    const matches = rows.filter((r) => sameRow(r, data));
-    const row = matches[data.k];
-    if (row) return { row, data, matches: matches.length };
-    if (rows.length < want) break; // everything loaded
-    want *= 3;
+  for (let i = 0; i < 8; i++) {
+    rows = await loadRows(want);
+    const hit = pick(rows);
+    if (hit) return hit;
+    if (rows.length >= want) {
+      want *= 3;
+      continue;
+    }
+    // Everything is loaded, but search results keep arriving in batches for a while.
+    if (!data.q) break;
+    const n = await cellCount();
+    if (!(await until(async () => ((await cellCount()) > n ? true : null), 4000, 300))) break;
   }
-  throw new OutlookError(`Message "${data.s}" from ${data.n} (${data.d}) is no longer in "${data.f}". List the folder again to get a fresh ref.`);
+  // The message may sit inside a collapsed conversation (Outlook also regroups search results while they load).
+  if (!data.c) {
+    const hidden = (r: RowInfo) => isConversation(r) && stripPrefixes(r.subject) === stripPrefixes(data.s);
+    for (let i = 0; i < 3; i++) {
+      const conv = rows.find(hidden);
+      if (!conv) break;
+      rows = await expandConversation(conv);
+      const hit = pick(rows);
+      if (hit) return hit;
+    }
+  }
+  throw new OutlookError(`Message "${data.s}" from ${data.n} (${data.d}) is no longer in "${data.f}"${data.q ? ` (search "${data.q}")` : ""}. List or search again to get a fresh ref.`);
 }
 
 /**
- * Conversation rows are not safe targets: selecting one makes Outlook open (and select) its newest item,
- * which may be a draft or a message in another folder. Expand it instead and ask for a specific message.
+ * Locate a ref's message and show it in the reading pane. A conversation ref stands for the message its
+ * row shows (the newest, or in search results the one that matched); `conversation` then lists every
+ * message of it. Callers that change or remove a message
+ * pass `single` to refuse conversation refs: selecting one makes Outlook open its newest item, which may
+ * be a draft or a message in another folder.
  */
-async function guardConversation(row: RowInfo) {
-  if (!row.conversationCount || row.conversationCount < 2) return;
-  await ax.set(row.h, "AXSelected", true).catch(() => {});
-  await sleep(800);
-  throw new OutlookError(
-    `This ref is a conversation of ${row.conversationCount} messages. Outlook has expanded it: list the folder again and use the ref of the specific message (conversation members from other folders show a "folder" field).`,
-  );
+async function openMessage(ref: string, opts: { single?: boolean } = {}): Promise<Located & { conversation?: MessageSummary[] }> {
+  for (let attempt = 0; ; attempt++) {
+    const loc = await locate(ref);
+    let { row } = loc;
+    let conversation: MessageSummary[] | undefined;
+    if (isConversation(row) || (loc.data.c && row.thread)) {
+      const rows = isConversation(row) ? await expandConversation(row) : await readRows(await messageTable());
+      const shown = isConversation(row) ? shownMessage(rows, { s: row.subject, d: row.date, p: previewKey(row.preview) })[0] : row;
+      const all = toSummaries(rows, loc.data.f, loc.data.q);
+      conversation = shown?.thread ? all.filter((_, i) => rows[i]!.thread?.id === shown.thread!.id) : [];
+      if (opts.single || !shown) {
+        const members = conversation.map((m) => `\n- ${m.ref}: ${m.sender}, ${m.date}${m.folder ? `, in ${m.folder}` : ""}`).join("");
+        throw new OutlookError(
+          `This ref is a conversation of ${row.conversationCount ?? row.thread?.count} messages${members ? "; use the ref of one of its messages:" + members : ". Outlook has expanded it: list the folder again and use the ref of the specific message."}`,
+        );
+      }
+      row = shown;
+    }
+    try {
+      await selectRow(row);
+      return { ...loc, row, conversation };
+    } catch (e) {
+      // The list may have re-rendered under us (search results still loading): look the row up again once.
+      if (attempt >= 1) throw e;
+    }
+  }
+}
+
+/** locate() for actions that first look at the row's state; conversation refs are refused (see openMessage). */
+async function locateSingle(ref: string): Promise<Located> {
+  const loc = await locate(ref);
+  return isConversation(loc.row) || (loc.data.c && loc.row.thread) ? openMessage(ref, { single: true }) : loc;
 }
 
 async function headerInfo(): Promise<{ subject: string | null; from: string | null; draftSubject: string | null }> {
@@ -514,7 +644,7 @@ async function headerInfo(): Promise<{ subject: string | null; from: string | nu
 /** Select a row and wait until the reading pane shows that exact message. */
 async function selectRow(row: RowInfo) {
   await ax.set(row.h, "AXSelected", true);
-  const norm = (x: string) => x.replace(/^((re|fw|fwd|aw|tr|wg)\s*:\s*)+/i, "").trim();
+  const norm = stripPrefixes;
   const matchesSubject = (s: string | null) =>
     s !== null && (s === row.subject || norm(s) === norm(row.subject) || (row.subject === "" && /^[(<]?no subject[)>]?$/i.test(s)));
   const ok = await until(async () => {
@@ -544,6 +674,8 @@ export interface MessageView {
   attachments: string[];
   conversationMessages: number;
   unreadRestored?: boolean;
+  /** When the ref was a conversation: its messages, newest first. The one read is the one its row showed. */
+  conversation?: MessageSummary[];
 }
 
 function cleanHeader(v: string | undefined, prefix: RegExp) {
@@ -609,8 +741,7 @@ async function readReadingPane(): Promise<Omit<MessageView, "ref">> {
 }
 
 async function rowUnread(row: RowInfo): Promise<boolean | null> {
-  const t = await ax.tree(row.h, 1).catch(() => null);
-  const desc = t?.children?.find((c) => c.role === "AXCell")?.desc;
+  const desc = await rowDesc(row.h);
   return desc ? (parseRowDesc(desc)?.unread ?? null) : null;
 }
 
@@ -625,12 +756,11 @@ async function restoreUnread(row: RowInfo): Promise<boolean> {
 }
 
 export async function readMessage(ref: string, opts: { markAsRead?: boolean } = {}): Promise<MessageView> {
-  const { row } = await locate(ref);
-  await guardConversation(row);
-  await selectRow(row);
+  const { row, conversation } = await openMessage(ref);
   await sleep(300);
   const view = await readReadingPane();
   const result: MessageView = { ref, ...view };
+  if (conversation) result.conversation = conversation;
   if (row.unread && !opts.markAsRead) result.unreadRestored = await restoreUnread(row).catch(() => false);
   return result;
 }
@@ -666,9 +796,7 @@ async function cancelSheet(match: Record<string, string>) {
  * we save into ~/Downloads under a unique name, then move the file to `outPath`.
  */
 export async function exportEml(ref: string, outPath?: string): Promise<string> {
-  const { row } = await locate(ref);
-  await guardConversation(row);
-  await selectRow(row);
+  const { row } = await openMessage(ref);
   const token = `axlook-${process.pid}-${Date.now().toString(36)}`;
   const saved = join(DOWNLOADS, `${token}.eml`);
   await withFocus(async () => {
@@ -723,9 +851,7 @@ async function countMatches(data: RefData): Promise<number> {
 export async function moveMessage(ref: string, destination: string) {
   const dest = await findFolderRow(destination);
   if (dest.section === "All Accounts" || dest.section === "Favorites") throw new OutlookError("Pick a destination inside a specific account (not 'All Accounts' or 'Favorites').");
-  const { row, data, matches } = await locate(ref);
-  await guardConversation(row);
-  await selectRow(row);
+  const { row, data, matches } = await openMessage(ref, { single: true });
   await withFocus(async () => {
     try {
       await ax.menu(["Message", "Move", "Choose Folder..."]);
@@ -757,8 +883,7 @@ export async function moveMessage(ref: string, destination: string) {
 }
 
 export async function setReadState(ref: string, read: boolean) {
-  const { row } = await locate(ref);
-  await guardConversation(row);
+  const { row } = await locateSingle(ref);
   if (row.unread === !read) return { changed: false, unread: row.unread };
   await selectRow(row);
   // Previewing may already mark it read.
@@ -773,14 +898,12 @@ export async function setReadState(ref: string, read: boolean) {
 }
 
 async function rowFlagged(row: RowInfo): Promise<boolean | null> {
-  const t = await ax.tree(row.h, 1).catch(() => null);
-  const desc = t?.children?.find((c) => c.role === "AXCell")?.desc;
+  const desc = await rowDesc(row.h);
   return desc ? (parseRowDesc(desc)?.flagged ?? null) : null;
 }
 
 export async function setFlag(ref: string, flagged: boolean) {
-  const { row } = await locate(ref);
-  await guardConversation(row);
+  const { row } = await locateSingle(ref);
   if (row.flagged === flagged) return { changed: false, flagged };
   await selectRow(row);
   await withFocus(async () => {
@@ -801,9 +924,7 @@ export async function setFlag(ref: string, flagged: boolean) {
 }
 
 export async function archiveMessage(ref: string) {
-  const { row, data, matches } = await locate(ref);
-  await guardConversation(row);
-  await selectRow(row);
+  const { row, data, matches } = await openMessage(ref, { single: true });
   await withFocus(async () => {
     await ax.menu(["Message", "Archive"]);
   });
@@ -813,12 +934,10 @@ export async function archiveMessage(ref: string) {
 
 /** Move to Deleted Items (Edit > Delete). Never permanently deletes. */
 export async function deleteMessage(ref: string) {
-  const { row, data, matches } = await locate(ref);
-  await guardConversation(row);
-  if (/deleted items|deleted messages|trash|bin/i.test(data.f)) {
+  if (/deleted items|deleted messages|trash|bin/i.test(decodeRef(ref).f)) {
     throw new OutlookError("Refusing to delete from a deleted-items folder: Outlook would delete it permanently.");
   }
-  await selectRow(row);
+  const { data, matches } = await openMessage(ref, { single: true });
   await withFocus(async () => {
     const isDraft = !!(await ax.findOne("main", { id: "subjectTextField" }, { depth: 10 }));
     if (!isDraft) {
@@ -838,4 +957,4 @@ export async function deleteMessage(ref: string) {
   return { movedToDeletedItems: true, verified: !!verified, from: data.f };
 }
 
-export { decodeRef, locate, selectRow };
+export { decodeRef, openMessage };

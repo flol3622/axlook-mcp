@@ -116,6 +116,15 @@ export async function withFocus<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
+/**
+ * Make Outlook frontmost again inside withFocus: another app (or the user) can take the focus back
+ * mid-flow, and Outlook then ignores presses on some buttons.
+ */
+export async function bringToFront() {
+  const res = await ax.call<{ active: boolean }>("activate", { settleMs: 150 });
+  if (!res.active) throw new OutlookError("Could not bring Outlook to the front.");
+}
+
 export type Module = "Mail" | "Calendar";
 
 /** Switch the main window to the Mail or Calendar module (works in the background). */
@@ -154,6 +163,16 @@ export async function need(h: string, match: Match, what: string, opts: { depth?
 /** All open Outlook windows except the main one (compose, event editors, ...). */
 export async function secondaryWindows(): Promise<AxNode[]> {
   return (await windows()).filter((w) => w.id !== "OutlookWindow" && w.role === "AXWindow" && w.subrole === "AXStandardWindow");
+}
+
+/**
+ * The window that opened since `before` was read. Windows are told apart by title, and an older window
+ * may carry the same title (e.g. a form left open): the newest one is listed first.
+ */
+export async function newWindow(before: AxNode[], accept: (w: AxNode) => boolean = () => true): Promise<AxNode | null> {
+  const count = (ws: AxNode[], title?: string) => ws.filter((w) => w.title === title).length;
+  const now = await secondaryWindows();
+  return now.find((w) => accept(w) && count(now, w.title) > count(before, w.title)) ?? null;
 }
 
 /** The real body editor under `root`: Outlook also keeps tiny off-screen text areas, so take the largest. */

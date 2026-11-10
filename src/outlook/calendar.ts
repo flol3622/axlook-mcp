@@ -1,7 +1,7 @@
 // Calendar: calendars, events (via the week grid and event "peek" popovers), create / edit / delete.
 import type { AxNode } from "../ax";
 import { KEY } from "../ax";
-import { ax, bodyEditor, need, OutlookError, secondaryWindows, sleep, switchModule, until, withFocus } from "./session";
+import { ax, bodyEditor, bringToFront, need, newWindow, OutlookError, secondaryWindows, sleep, switchModule, until, withFocus } from "./session";
 
 // ---------------------------------------------------------------------------------------------
 // Calendars
@@ -308,9 +308,10 @@ async function closePeek(popover: AxNode) {
 
 function toEvent(btn: GridButton, p: { fields: Record<string, string>; flat: AxNode[] }, k: number): EventInfo {
   const f = p.fields;
-  const dateText = f.dateField ?? "";
+  // All-day events and timed events that span days show separate start/end fields instead of dateField/timeField.
+  const dateText = f.dateField ?? [f.startDateField ?? f.allDayStartDateField, f.endDateField ?? f.allDayEndDateField].filter(Boolean).join(" - ");
   const dates = [...dateText.matchAll(/(?:\w+day, )?(\d{1,2} [A-Za-z]+ \d{4}|[A-Za-z]+ \d{1,2}, \d{4})/g)].map((m) => parseLongDate(m[1]!)).filter(Boolean) as Date[];
-  const times = parseTimes(f.timeField ?? "") ?? parseTimes(dateText);
+  const times = parseTimes(f.timeField ?? "") ?? parseTimes(dateText) ?? (f.startTimeField && f.endTimeField ? { start: to24(f.startTimeField), end: to24(f.endTimeField) } : null);
   const first = dates[0] ? ymd(dates[0]) : btn.day ?? "";
   const allDay = btn.allDay && !times;
   const subject = f.subjectField ?? btn.label.split(", ")[0] ?? "";
@@ -480,7 +481,7 @@ export async function getEvent(ref: string, opts: { full?: boolean } = {}) {
     const openBtn = p.flat.find((n) => n.id === "openEvent");
     if (openBtn) await ax.press(openBtn.h);
     else await ax.press((btn.inner ?? btn.outer).h, "Open event");
-    const win = await until(async () => (await secondaryWindows()).find((w) => !before.some((b) => b.title === w.title)) ?? null, 6000);
+    const win = await until(() => newWindow(before), 6000);
     if (!win) throw new OutlookError("The event window did not open.");
     try {
       const tree = await ax.tree(win.h, 8, { maxChildren: 120 });
@@ -533,19 +534,38 @@ function parseLocal(s: string): Date {
   return d;
 }
 
+const hm = (d: Date) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+
+/** Current value of one of the form's date/time pickers, or null when the form has no such field. */
+async function readDateField(win: AxNode, title: string): Promise<Date | null> {
+  const v = (await ax.findOne(win.h, { role: "AXDateTimeArea", title }, { depth: 6 }))?.value;
+  return v ? new Date(v) : null;
+}
+
 async function setDateField(win: AxNode, title: string, d: Date) {
-  const f = await ax.findOne(win.h, { role: "AXDateTimeArea", title }, { depth: 6 });
-  if (!f) return false;
-  await ax.call("set", { h: f.h, attr: "AXValue", value: d.toISOString().replace(/\.\d{3}Z$/, "Z"), type: "date" });
-  // Read back: date fields keep their time component and vice versa, so compare the relevant part.
-  const ok = await until(async () => {
-    const v = (await ax.get(f.h)).value;
-    if (!v) return false;
-    const got = new Date(v);
-    return /date/i.test(title) ? ymd(got) === ymd(d) : got.getHours() === d.getHours() && got.getMinutes() === d.getMinutes();
-  }, 2000, 150);
-  if (!ok) throw new OutlookError(`Outlook did not accept ${title} = ${d.toString()}.`);
-  return true;
+  const isDate = /date/i.test(title);
+  const same = (got: Date | null) => !!got && (isDate ? ymd(got) === ymd(d) : hm(got) === hm(d));
+  let got: Date | null = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const f = await ax.findOne(win.h, { role: "AXDateTimeArea", title }, { depth: 6 });
+    if (!f?.value) {
+      if (!f) return false;
+      await sleep(300);
+      continue;
+    }
+    // Every picker holds a full date and time. Change only its own part: a time picker given another day
+    // is clamped to the start, or silently turns the event into a multi-day one.
+    const cur = new Date(f.value);
+    const value = isDate
+      ? new Date(d.getFullYear(), d.getMonth(), d.getDate(), cur.getHours(), cur.getMinutes())
+      : new Date(cur.getFullYear(), cur.getMonth(), cur.getDate(), d.getHours(), d.getMinutes());
+    await ax.call("set", { h: f.h, attr: "AXValue", value: value.toISOString().replace(/\.\d{3}Z$/, "Z"), type: "date" });
+    // The form may rebuild the picker, so read it back through a fresh lookup.
+    const ok = await until(async () => same((got = await readDateField(win, title))), 2000, 150);
+    if (ok) return true;
+  }
+  const shown = got ? (isDate ? ymd(got) : hm(got)) : "nothing";
+  throw new OutlookError(`Outlook did not accept ${title} = ${isDate ? ymd(d) : hm(d)} (the field shows ${shown}).`);
 }
 
 async function chooseCalendar(win: AxNode, cal: CalRow) {
@@ -632,7 +652,8 @@ async function fillForm(win: AxNode, input: EventInput, isNew: boolean) {
   }
   if (input.start) {
     const s = parseLocal(input.start);
-    if (!(await ax.findOne(win.h, { role: "AXDateTimeArea", title: "Start date" }, { depth: 6 }))) throw new OutlookError("The event form has no Start date field.");
+    // An existing event's form fills in after its window opens.
+    if (!(await until(() => readDateField(win, "Start date"), 4000, 200))) throw new OutlookError("The event form has no Start date field.");
     // Setting the date first keeps Outlook's duration logic predictable.
     await setDateField(win, "Start date", s);
     if (!allDay) await setDateField(win, "Start time", s);
@@ -640,10 +661,17 @@ async function fillForm(win: AxNode, input: EventInput, isNew: boolean) {
   }
   if (input.end) {
     const e = parseLocal(input.end);
-    const s = input.start ? parseLocal(input.start) : null;
+    const formStart = await until(() => readDateField(win, "Start date"), 4000, 200);
+    const startTime = allDay ? null : await readDateField(win, "Start time");
+    const s = formStart && new Date(formStart.getFullYear(), formStart.getMonth(), formStart.getDate(), startTime?.getHours() ?? 0, startTime?.getMinutes() ?? 0);
+    if (s && (allDay ? ymd(e) < ymd(s) : e <= s)) {
+      throw new OutlookError(`end (${input.end}) must be after the event's start (${ymd(s)}${allDay ? "" : " " + hm(s)}).${input.start ? "" : " Pass start as well to move the event."}`);
+    }
     const hasEndDate = await setDateField(win, "End date", e);
     if (!hasEndDate && s && ymd(s) !== ymd(e) && !allDay) {
-      throw new OutlookError("Outlook's form has no End date field for timed events; multi-day timed events are not supported.");
+      throw new OutlookError(
+        `end (${input.end}) is on another day than the event's start (${ymd(s)}), and Outlook's form has no End date field for timed events: multi-day timed events are not supported.${input.start ? "" : " Pass start as well to move the event."}`,
+      );
     }
     if (!allDay) await setDateField(win, "End time", e);
     await sleep(250);
@@ -696,6 +724,9 @@ async function checkLocation(win: AxNode, location: string) {
   }
 }
 
+/** A closed window's element stops answering (titles cannot tell: another window may carry the same one). */
+const windowGone = async (win: AxNode) => !(await ax.get(win.h).catch(() => null))?.role;
+
 async function saveForm(win: AxNode) {
   const save = await ax.findOne(win.h, { role: "AXButton", descRegex: "^Save(,|$)" }, { depth: 3 });
   if (!save) {
@@ -703,16 +734,22 @@ async function saveForm(win: AxNode) {
     if (send) throw new OutlookError("This event has attendees, so Outlook would send invitations/updates. The server only saves events without notifying anyone; the form was left open.");
     throw new OutlookError("Could not find the event's Save button.");
   }
-  await ax.press(save.h);
-  // Recurring events ask whether to change one occurrence or the series.
-  const prompt = await ax.waitFor(win.h, { role: "AXSheet" }, { timeoutMs: 1200, depth: 1 }).catch(() => null);
-  if (prompt?.ok && prompt.node) {
-    const buttons = await ax.find(prompt.node.h, { role: "AXButton" }, { depth: 2 });
-    const occ = buttons.find((b) => /occurrence|this event/i.test(b.title ?? ""));
-    if (occ) await ax.press(occ.h);
+  // Outlook ignores Save (the button just stays "pressed") unless it is the frontmost app, and another app
+  // can take the focus back at any moment: activate right before pressing, and press again if nothing happened.
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await bringToFront();
+    const btn = attempt ? await ax.findOne(win.h, { role: "AXButton", descRegex: "^Save(,|$)" }, { depth: 3 }).catch(() => null) : save;
+    if (btn) await ax.press(btn.h).catch(() => {});
+    // Recurring events ask whether to change one occurrence or the series.
+    const prompt = await ax.waitFor(win.h, { role: "AXSheet" }, { timeoutMs: 1200, depth: 1 }).catch(() => null);
+    if (prompt?.ok && prompt.node) {
+      const buttons = await ax.find(prompt.node.h, { role: "AXButton" }, { depth: 2 });
+      const occ = buttons.find((b) => /occurrence|this event/i.test(b.title ?? ""));
+      if (occ) await ax.press(occ.h);
+    }
+    if (await until(() => windowGone(win), attempt ? 8000 : 4000)) return;
   }
-  const closed = await until(async () => !(await secondaryWindows()).some((w) => w.title === win.title || w.h === win.h), 8000);
-  if (!closed) throw new OutlookError("The event window did not close after saving; check Outlook for a validation message.");
+  throw new OutlookError("The event window did not close after saving, so the event was not saved; check Outlook for a validation message.");
 }
 
 /** After saving, wait until the grid shows a tile with this subject on that day (Outlook redraws lazily). */
@@ -722,17 +759,34 @@ async function waitForTile(day: Date, subject: string): Promise<boolean> {
   return !!(await until(async () => (await gridButtons()).some((b) => b.label.startsWith(subject) && (b.allDay || b.day === d)), 8000, 400));
 }
 
-/** Close an event form without saving, answering a "discard changes?" prompt. */
-async function discardForm(win: AxNode) {
-  const discard = await ax.findOne(win.h, { role: "AXButton", descRegex: "^(Discard|Close)(,|$)" }, { depth: 3 }).catch(() => null);
-  const close = discard ?? (await ax.findOne(win.h, { subrole: "AXCloseButton" }, { depth: 1 }).catch(() => null));
-  if (!close) return;
-  await ax.press(close.h).catch(() => {});
-  const sheet = await ax.waitFor(win.h, { role: "AXSheet" }, { timeoutMs: 1500, depth: 1 }).catch(() => null);
-  if (sheet?.ok && sheet.node) {
-    const btn = await ax.findOne(sheet.node.h, { role: "AXButton", titleRegex: "^(Discard|Don.t Save|Delete)" }, { depth: 2 });
-    if (btn) await ax.press(btn.h).catch(() => {});
+/** Close an event form without saving, answering a "discard changes?" prompt. Returns whether it closed. */
+async function discardForm(win: AxNode): Promise<boolean> {
+  const gone = () => windowGone(win);
+  for (let attempt = 0; attempt < 2 && !(await gone()); attempt++) {
+    await bringToFront().catch(() => {});
+    let sheet = await ax.findOne(win.h, { role: "AXSheet" }, { depth: 1 }).catch(() => null);
+    if (!sheet) {
+      const discard = await ax.findOne(win.h, { role: "AXButton", descRegex: "^(Discard|Close)(,|$)" }, { depth: 3 }).catch(() => null);
+      const close = discard ?? (await ax.findOne(win.h, { subrole: "AXCloseButton" }, { depth: 1 }).catch(() => null));
+      if (close) await ax.press(close.h).catch(() => {});
+      sheet = (await ax.waitFor(win.h, { role: "AXSheet" }, { timeoutMs: 1500, depth: 1 }).catch(() => null))?.node ?? null;
+    }
+    if (sheet) {
+      const btn = await ax.findOne(sheet.h, { role: "AXButton", titleRegex: "^(Discard|Don.t Save|Delete)" }, { depth: 2 }).catch(() => null);
+      if (btn) await ax.press(btn.h).catch(() => {});
+    }
+    if (await until(gone, 3000, 200)) return true;
   }
+  return gone();
+}
+
+/** A failed create/edit must not leave its form behind: close it, or tell the caller that it is still open. */
+async function abandonForm(win: AxNode, e: unknown): Promise<never> {
+  if (e instanceof OutlookError && /attendees/.test(e.message)) throw e;
+  if (await discardForm(win)) throw e;
+  const title = (await ax.get(win.h).catch(() => null))?.title ?? win.title ?? "";
+  const note = ` Its window ("${title}") is still open with unsaved changes: close it without saving before retrying, or the event may end up duplicated.`;
+  throw e instanceof OutlookError ? new OutlookError(e.message + note) : e;
 }
 
 export async function createEvent(input: EventInput & { subject: string; start: string; end?: string }) {
@@ -743,7 +797,7 @@ export async function createEvent(input: EventInput & { subject: string; start: 
     const before = await secondaryWindows();
     const newBtn = await need("main", { role: "AXButton", descRegex: "^New Event(,|$)" }, "the New Event button", { depth: 2 });
     await ax.press(newBtn.h);
-    const win = await until(async () => (await secondaryWindows()).find((w) => (w.title ?? "").startsWith("New Event") && !before.some((b) => b.title === w.title)) ?? null, 8000);
+    const win = await until(() => newWindow(before, (w) => (w.title ?? "").startsWith("New Event")), 8000);
     if (!win) throw new OutlookError("The New Event window did not open.");
     try {
       await fillForm(win, { ...input, allDay: input.allDay ?? false }, true);
@@ -754,13 +808,12 @@ export async function createEvent(input: EventInput & { subject: string; start: 
       return {
         created: true,
         verified,
-        ref: encodeRef({ v: 1, d: ymd(s), s: input.subject, t: input.allDay ? "" : `${String(s.getHours()).padStart(2, "0")}:${String(s.getMinutes()).padStart(2, "0")}`, k: 0 }),
+        ref: encodeRef({ v: 1, d: ymd(s), s: input.subject, t: input.allDay ? "" : hm(s), k: 0 }),
         calendar: cal.length >= 3 ? `${cal[2]}/${cal[1]}` : null,
       };
     } catch (e) {
       // Leave nothing half-created behind.
-      if (!(e instanceof OutlookError && /attendees/.test(e.message))) await discardForm(win);
-      throw e;
+      return abandonForm(win, e);
     }
   });
 }
@@ -780,15 +833,14 @@ export async function updateEvent(ref: string, changes: EventInput) {
     // Recurring events: Outlook may ask "this event or the series?" before opening the editor.
     const occ = await ax.waitFor("app", { role: "AXButton", titleRegex: "(?i)(this event|this occurrence|^Occurrence)" }, { timeoutMs: 1500, depth: 6 }).catch(() => null);
     if (occ?.ok && occ.node) await ax.press(occ.node.h);
-    const win = await until(async () => (await secondaryWindows()).find((w) => !before.some((b) => b.title === w.title)) ?? null, 8000);
+    const win = await until(() => newWindow(before), 8000);
     if (!win) throw new OutlookError("The event editor did not open.");
     try {
       await fillForm(win, changes, false);
       const title = (await ax.get(win.h)).title ?? "";
       await saveForm({ ...win, title });
     } catch (e) {
-      if (!(e instanceof OutlookError && /attendees/.test(e.message))) await discardForm(win);
-      throw e;
+      await abandonForm(win, e);
     }
     const s = changes.start ? parseLocal(changes.start) : null;
     const allDay = changes.allDay ?? data.t === "";
@@ -800,7 +852,7 @@ export async function updateEvent(ref: string, changes: EventInput) {
         v: 1,
         d: s ? ymd(s) : data.d,
         s: changes.subject ?? data.s,
-        t: allDay ? "" : s ? `${String(s.getHours()).padStart(2, "0")}:${String(s.getMinutes()).padStart(2, "0")}` : data.t,
+        t: allDay ? "" : s ? hm(s) : data.t,
         k: 0,
       }),
     };

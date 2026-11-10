@@ -1,7 +1,7 @@
 // Drafts: new messages, replies and forwards are saved to Drafts and never sent.
 import { KEY, type AxNode } from "../ax";
 import { ax, bodyEditor, need, openApp, OutlookError, pasteInto, secondaryWindows, sleep, until, withFocus } from "./session";
-import { locate, selectRow } from "./mail";
+import { openMessage } from "./mail";
 
 export interface DraftInput {
   to?: string[];
@@ -123,8 +123,7 @@ export async function createDraft(d: DraftInput) {
 
 /** Create a reply / reply-all / forward draft for a listed message. Nothing is sent. */
 export async function respondDraft(ref: string, kind: "reply" | "replyAll" | "forward", body: string, opts: { to?: string[]; html?: boolean } = {}) {
-  const { row } = await locate(ref);
-  await selectRow(row);
+  await openMessage(ref);
   const menuItem = { reply: "Reply", replyAll: "Reply All", forward: "Forward" }[kind];
   return withFocus(async () => {
     const before = await secondaryWindows();
