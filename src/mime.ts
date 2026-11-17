@@ -85,7 +85,7 @@ export async function parseEml(path: string): Promise<ParsedMessage> {
     headers,
     text,
     html,
-    attachments: email.attachments.map(toMeta),
+    attachments: metasOf(email),
   };
 }
 
@@ -121,15 +121,38 @@ function contentBytes(att: PmAttachment): Uint8Array {
   return c instanceof Uint8Array ? c : new Uint8Array(c);
 }
 
-function toMeta(att: PmAttachment, index: number): AttachmentMeta {
+function metasOf(email: Email): AttachmentMeta[] {
+  const cids = referencedCids(email.html);
+  return email.attachments.map((att, index) => toMeta(att, index, cids));
+}
+
+/** Content-IDs the HTML body shows in place (`cid:` URLs), lower-cased, without angle brackets. */
+function referencedCids(html: string | undefined): Set<string> {
+  const out = new Set<string>();
+  for (const m of (html ?? "").matchAll(/cid:([^"'\s)>]+)/gi)) {
+    let id = m[1]!;
+    try {
+      id = decodeURIComponent(id);
+    } catch {}
+    out.add(id.toLowerCase());
+  }
+  return out;
+}
+
+/**
+ * Only parts shown inside the body (referenced through `cid:`) count as inline. Senders such as Gmail mark
+ * ordinary attachments (PDFs…) with `Content-Disposition: inline` or a Content-ID; those are real files.
+ */
+function toMeta(att: PmAttachment, index: number, cids: Set<string>): AttachmentMeta {
   const mimeType = att.mimeType || "application/octet-stream";
   const filename = att.filename?.trim() || `attachment-${index}.${extensionFor(mimeType)}`;
+  const cid = att.contentId?.replace(/^<|>$/g, "").toLowerCase();
   return {
     index,
     filename,
     mimeType,
     size: contentBytes(att).byteLength,
-    inline: att.disposition === "inline" || Boolean(att.contentId),
+    inline: !!cid && cids.has(cid),
     contentId: att.contentId ?? null,
   };
 }
@@ -172,9 +195,9 @@ export async function saveAttachments(
   path: string,
   outDir: string,
   opts: SaveOptions = {},
-): Promise<SavedAttachment[]> {
+): Promise<{ saved: SavedAttachment[]; skipped: AttachmentMeta[] }> {
   const email = await parseRaw(path);
-  const metas = email.attachments.map(toMeta);
+  const metas = metasOf(email);
 
   const explicit = opts.indexes !== undefined || opts.names !== undefined;
   const indexes = new Set(opts.indexes ?? []);
@@ -195,7 +218,7 @@ export async function saveAttachments(
     const target = await writeUnique(root, safe, contentBytes(att));
     saved.push({ ...meta, path: target });
   }
-  return saved;
+  return { saved, skipped: metas.filter((m) => !selected.includes(m)) };
 }
 
 /** Make an attachment name safe to use as a single path component. */

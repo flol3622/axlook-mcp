@@ -621,24 +621,7 @@ async function fillForm(win: AxNode, input: EventInput, isNew: boolean) {
     if (!isNew) throw new OutlookError("Moving an existing event to another calendar is not supported.");
     await chooseCalendar(win, await findCalendar(input.calendar));
   }
-  if (input.subject !== undefined) {
-    // Setting AXValue only changes the display; type it so Outlook's model sees the edit.
-    const field = () => need(win.h, { role: "AXTextField", desc: "Subject" }, "the Subject field", { depth: 4 });
-    const read = async () => (await field()).value ?? "";
-    let ok = false;
-    for (let attempt = 0; attempt < 2 && !ok; attempt++) {
-      const subj = await field();
-      const focused = await until(async () => {
-        await ax.set(subj.h, "AXFocused", true);
-        return (await ax.get(subj.h, { attrs: ["AXFocused"] })).attrs?.AXFocused === true;
-      }, 3000, 250);
-      if (!focused) continue;
-      await ax.menu(["Edit", "Select All"]).catch(() => {});
-      await ax.type(input.subject); // typing (not AXValue) so the edit reaches Outlook's model
-      ok = !!(await until(async () => (await read()) === input.subject, 3000, 200));
-    }
-    if (!ok) throw new OutlookError(`Could not enter the event subject (field reads "${await read()}").`);
-  }
+  if (input.subject !== undefined) await enterSubject(win, input.subject);
   if (input.allDay !== undefined) {
     const sw = await ax.findOne(win.h, { role: "AXCheckBox", title: "All day" }, { depth: 4 });
     if (sw && (sw.value === "1") !== input.allDay) {
@@ -713,6 +696,35 @@ async function fillForm(win: AxNode, input: EventInput, isNew: boolean) {
   if (input.location !== undefined) {
     await checkLocation(win, input.location);
   }
+}
+
+/** The form's window title, "<subject> • <calendar> • <account>", follows Outlook's model rather than the field. */
+const formTitle = async (win: AxNode) => (await ax.get(win.h).catch(() => null))?.title ?? "";
+const titleHasSubject = async (win: AxNode, subject: string) => !subject.trim() || (await formTitle(win)).startsWith(subject.trim() + " • ");
+
+async function enterSubject(win: AxNode, subject: string) {
+  // Setting AXValue only changes the display; type it so Outlook's model sees the edit.
+  const field = () => need(win.h, { role: "AXTextField", desc: "Subject" }, "the Subject field", { depth: 4 });
+  const read = async () => (await field()).value ?? "";
+  // The field can show the typed text while the model (and so the saved event) got something else.
+  const entered = async () => (await read()) === subject && (await titleHasSubject(win, subject));
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const subj = await field();
+    const focused = await until(async () => {
+      await ax.set(subj.h, "AXFocused", true);
+      return (await ax.get(subj.h, { attrs: ["AXFocused"] })).attrs?.AXFocused === true;
+    }, 3000, 250);
+    if (!focused) continue;
+    await ax.menu(["Edit", "Select All"]).catch(() => {});
+    await ax.type(subject);
+    if (await until(entered, 3000, 200)) return;
+  }
+  throw new OutlookError(`Could not enter the event subject (field reads "${await read()}", window title "${await formTitle(win)}").`);
+}
+
+/** Right before saving: the subject must still be the one entered (later edits can disturb it). */
+async function checkSubject(win: AxNode, subject: string) {
+  if (!(await titleHasSubject(win, subject))) await enterSubject(win, subject);
 }
 
 async function checkLocation(win: AxNode, location: string) {
@@ -801,6 +813,7 @@ export async function createEvent(input: EventInput & { subject: string; start: 
     if (!win) throw new OutlookError("The New Event window did not open.");
     try {
       await fillForm(win, { ...input, allDay: input.allDay ?? false }, true);
+      await checkSubject(win, input.subject);
       const title = (await ax.get(win.h)).title ?? "";
       await saveForm({ ...win, title });
       const cal = title.split(" • ");
@@ -837,6 +850,7 @@ export async function updateEvent(ref: string, changes: EventInput) {
     if (!win) throw new OutlookError("The event editor did not open.");
     try {
       await fillForm(win, changes, false);
+      if (changes.subject !== undefined) await checkSubject(win, changes.subject);
       const title = (await ax.get(win.h)).title ?? "";
       await saveForm({ ...win, title });
     } catch (e) {

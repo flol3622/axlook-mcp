@@ -2,7 +2,7 @@
 // a test folder, test drafts and a test event (all cleaned up). Usage: bun scripts/e2e.ts [step…]
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { mkdtempSync, readdirSync } from "node:fs";
+import { mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -135,6 +135,14 @@ await step("draft.new", async () => {
   const r = await call("outlook_create_draft", { to: [SELF], subject: "MCP e2e draft (safe to delete)", body: "Line one\nLine two ✓ — é" });
   assert(r.saved, "not saved");
   return `from ${r.from}`;
+});
+await step("draft.attachments", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "outlook-e2e-files-"));
+  const txt = join(dir, "e2e-note.txt");
+  writeFileSync(txt, "MCP e2e attachment\n");
+  const r = await call("outlook_create_draft", { to: [SELF], subject: "MCP e2e draft with file (safe to delete)", body: "See the file.", attachments: [txt] });
+  assert(r.saved && r.attachments?.[0] === "e2e-note.txt", "attachment missing");
+  return r.attachments.join(", ");
 });
 await step("draft.reply", async () => {
   msg = await single();

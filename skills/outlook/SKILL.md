@@ -22,10 +22,10 @@ The user may have saved their own rules: which calendar each kind of event goes 
 3. **Act on a message with its `ref`.**
    - `outlook_read_message` reads it and keeps it unread unless asked.
    - `outlook_get_message_source` returns the full headers and HTML.
-   - `outlook_save_attachments` saves attachments.
+   - `outlook_save_attachments` saves attachments. Images shown inside the body (logos, signatures) are skipped unless `include_inline` is set; the result lists what it skipped.
    - `outlook_move_message`, `outlook_mark_read`, `outlook_set_flag`, `outlook_archive_message` and `outlook_delete_message` change it. Delete moves it to Deleted Items.
 4. **Conversation rows.** A row with `conversationCount > 1` is a whole thread. The first call on it expands it and returns guidance. List the folder again and use the ref of the specific message.
-5. **Drafts.** `outlook_create_draft`, `outlook_create_reply_draft` and `outlook_create_forward_draft` save to Drafts and **never send**. Tell the user the draft is ready for review. Pass `from` to `outlook_create_draft` to choose the sending account. Replies and forwards always use the account that received the original message: the result reports it as `from`. If that contradicts a convention, tell the user.
+5. **Drafts.** `outlook_create_draft`, `outlook_create_reply_draft` and `outlook_create_forward_draft` save to Drafts and **never send**. Tell the user the draft is ready for review. Pass `attachments` (local file paths) to add files: images are embedded in the body after your text, other files are attached. A failed call discards its unfinished draft, so retrying does not create duplicates. Replying to a conversation that already holds a draft answers its newest received message. Pass `from` to `outlook_create_draft` to choose the sending account. Replies and forwards always use the account that received the original message: the result reports it as `from`. If that contradicts a convention, tell the user.
 6. **Calendar.**
    - `outlook_list_events` takes a `start` and `end` date (`YYYY-MM-DD`, at most about two months).
    - `outlook_get_event` returns one event; `full=true` adds attendees and description.

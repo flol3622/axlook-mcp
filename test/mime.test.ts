@@ -96,6 +96,46 @@ Inner body.
 --MIX--
 `;
 
+// Gmail marks ordinary attachments inline and gives them a Content-ID the body never references.
+const GMAIL_INLINE = `From: sender@example.org
+To: you@example.org
+Subject: Quote
+Date: Tue, 3 Nov 2026 11:00:00 +0000
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="MIX"
+
+--MIX
+Content-Type: multipart/related; boundary="REL"
+
+--REL
+Content-Type: text/html; charset=utf-8
+
+<p>Quote attached. <img src="cid:ii_sig%40x"></p>
+--REL
+Content-Type: image/png; name="sig.png"
+Content-ID: <ii_sig@x>
+Content-Disposition: inline; filename="sig.png"
+Content-Transfer-Encoding: base64
+
+${PNG_BYTES.toString("base64")}
+--REL--
+--MIX
+Content-Type: application/pdf; name="quote.pdf"
+Content-Disposition: inline; filename="quote.pdf"
+Content-ID: <f_quote1>
+Content-Transfer-Encoding: base64
+
+${Buffer.from(PDF_BYTES).toString("base64")}
+--MIX
+Content-Type: image/jpeg; name="photo.jpg"
+Content-Disposition: inline; filename="photo.jpg"
+Content-ID: <f_photo1>
+Content-Transfer-Encoding: base64
+
+${PNG_BYTES.toString("base64")}
+--MIX--
+`;
+
 const HTML_ONLY = `From: news@example.org
 To: you@example.org
 Subject: Newsletter
@@ -111,13 +151,14 @@ Content-Type: text/html; charset=utf-8
 </body></html>
 `;
 
-let alternative: string, mixed: string, htmlOnly: string;
+let alternative: string, mixed: string, htmlOnly: string, gmailInline: string;
 
 beforeAll(async () => {
   dir = await mkdtemp(join(tmpdir(), "mime-test-"));
   alternative = await fixture("alt.eml", ALTERNATIVE);
   mixed = await fixture("mixed.eml", MIXED);
   htmlOnly = await fixture("html.eml", HTML_ONLY);
+  gmailInline = await fixture("gmail-inline.eml", GMAIL_INLINE);
 });
 
 afterAll(async () => {
@@ -200,7 +241,7 @@ describe("sanitizeFilename", () => {
 describe("saveAttachments", () => {
   test("saves non-inline attachments by default, safely", async () => {
     const out = join(dir, "out-default", "nested");
-    const saved = await saveAttachments(mixed, out);
+    const saved = (await saveAttachments(mixed, out)).saved;
     const files = (await readdir(out)).sort();
     expect(saved.every((s) => !s.inline)).toBe(true);
     expect(files).toContain("report.pdf");
@@ -216,26 +257,35 @@ describe("saveAttachments", () => {
     expect(await Bun.file(join(dir, "evil.txt")).exists()).toBe(false);
   });
 
+  test("parts marked inline but not shown in the body are saved by default", async () => {
+    const out = join(dir, "out-gmail");
+    const { saved, skipped } = await saveAttachments(gmailInline, out);
+    expect(saved.map((s) => s.filename).sort()).toEqual(["photo.jpg", "quote.pdf"]);
+    expect(saved.every((s) => !s.inline)).toBe(true);
+    expect(skipped.map((s) => s.filename)).toEqual(["sig.png"]);
+    expect(skipped[0]!.inline).toBe(true);
+  });
+
   test("includeInline adds inline parts", async () => {
     const out = join(dir, "out-inline");
-    const saved = await saveAttachments(mixed, out, { includeInline: true });
+    const saved = (await saveAttachments(mixed, out, { includeInline: true })).saved;
     expect(saved.map((s) => s.filename)).toContain("logo.png");
     expect(new Uint8Array(await readFile(join(out, "logo.png")))).toEqual(new Uint8Array(PNG_BYTES));
   });
 
   test("selects exactly by index or case-insensitive name", async () => {
     const out = join(dir, "out-select");
-    const saved = await saveAttachments(mixed, out, { names: ["LOGO.PNG"], indexes: [] });
+    const saved = (await saveAttachments(mixed, out, { names: ["LOGO.PNG"], indexes: [] })).saved;
     expect(saved.map((s) => s.filename)).toEqual(["logo.png"]);
-    const byIndex = await saveAttachments(mixed, join(dir, "out-index"), { indexes: [saved[0]!.index] });
+    const byIndex = (await saveAttachments(mixed, join(dir, "out-index"), { indexes: [saved[0]!.index] })).saved;
     expect(byIndex.map((s) => s.filename)).toEqual(["logo.png"]);
   });
 
   test("never overwrites: second save gets ' (1)'", async () => {
     const out = join(dir, "out-dup");
-    const first = await saveAttachments(mixed, out, { names: ["report.pdf"] });
-    const second = await saveAttachments(mixed, out, { names: ["report.pdf"] });
-    const third = await saveAttachments(mixed, out, { names: ["report.pdf"] });
+    const first = (await saveAttachments(mixed, out, { names: ["report.pdf"] })).saved;
+    const second = (await saveAttachments(mixed, out, { names: ["report.pdf"] })).saved;
+    const third = (await saveAttachments(mixed, out, { names: ["report.pdf"] })).saved;
     expect(first[0]!.path).toBe(join(out, "report.pdf"));
     expect(second[0]!.path).toBe(join(out, "report (1).pdf"));
     expect(third[0]!.path).toBe(join(out, "report (2).pdf"));

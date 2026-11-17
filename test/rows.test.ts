@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { expandedConversation, parseRowDesc } from "../src/outlook/mail";
+import { expandedConversation, parseRowDesc, sameSubject, samePreview } from "../src/outlook/mail";
 import { parseLongDate, parseRange, ymd } from "../src/outlook/calendar";
 
 // Row descriptions captured from New Outlook 16.114.
@@ -86,6 +86,41 @@ describe("expandedConversation", () => {
   test("collapsed conversations and group headers are not", () => {
     expect(expandedConversation("   Conversation, 5 messages, Sender: Dirk Peeters, Subject: Abstract submission,   Latest message:  23/09/2026, ")).toBeNull();
     expect(expandedConversation("Top Results, Expanded")).toBeNull();
+  });
+});
+
+describe("meeting messages", () => {
+  test("invitation: the received date is the last date, not the meeting's", () => {
+    const r = parseRowDesc("     Sender: Ann Lee, Subject: Planning talk,  Meeting message,Fri 27/11/2026, 09:00 (1 hour) No Conflicts    Yesterday,        Message preview: Hello, ")!;
+    expect(r.subject).toBe("Planning talk");
+    expect(r.meeting).toBe(true);
+    expect(r.date).toBe("Yesterday");
+  });
+  test("response: a single space before the marker does not end up in the subject", () => {
+    const r = parseRowDesc("     Sender: Ann Lee, Subject: Accepted: Planning talk, Meeting message,    12/11/2026,        Message preview: , ")!;
+    expect(r.subject).toBe("Accepted: Planning talk");
+    expect(r.meeting).toBe(true);
+    expect(r.date).toBe("12/11/2026");
+  });
+  test("subject that merely mentions a meeting message is kept", () => {
+    const r = parseRowDesc("     Sender: A, Subject: Re: Meeting messages archive,      Today,        Message preview: x, ")!;
+    expect(r.subject).toBe("Re: Meeting messages archive");
+    expect(r.meeting).toBe(false);
+  });
+});
+
+describe("matching a row to the reading pane", () => {
+  test("list tags and prefixes shown only in the pane", () => {
+    expect(sameSubject("[list] FW: Invitation: seminar", "Invitation: seminar")).toBe(true);
+    expect(sameSubject("RE: [EXTERNAL] Re: Budget 2027", "Re: Budget 2027")).toBe(true);
+    expect(sameSubject("Accepted: Planning talk", "Accepted: Planning talk")).toBe(true);
+    expect(sameSubject("(No subject)", "")).toBe(true);
+    expect(sameSubject("Budget 2028", "Budget 2027")).toBe(false);
+    expect(sameSubject(null, "x")).toBe(false);
+  });
+  test("previews differing only in punctuation and spacing", () => {
+    expect(samePreview("From: A <a@x.org> Sent: Thursday, July 2", "From: A <a@x.org>. Sent: ")).toBe(true);
+    expect(samePreview("Something else entirely", "From: A")).toBe(false);
   });
 });
 
