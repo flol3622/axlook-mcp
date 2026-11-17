@@ -164,6 +164,10 @@ export class AxClient {
   paste(text: string, html?: string, settleMs = 1200) {
     return this.call("paste", { text, html, settleMs });
   }
+  /** Paste files via Edit > Paste, as a copy in Finder would; the user's clipboard is restored afterwards. */
+  pasteFiles(paths: string[], settleMs = 1500) {
+    return this.call("paste", { files: paths, settleMs });
+  }
   click(h: string) {
     return this.call("click", { h });
   }

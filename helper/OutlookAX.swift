@@ -363,7 +363,20 @@ func outlookIsFrontmost() -> Bool {
   return CFGetTypeID(v) == CFBooleanGetTypeID() && (v as! Bool)
 }
 
+/// Input is only ever sent while Outlook is frontmost. Another app (often the one that launched this
+/// server, finishing a Space switch) can take the focus back mid-flow: re-activate Outlook once, then refuse.
 func requireFrontmost(_ what: String) throws {
+  if outlookIsFrontmost() { return }
+  if let app = try? outlookApp() {
+    if app.isHidden { app.unhide() }
+    app.activate(options: [.activateAllWindows])
+    if !waitUntil(1500, { outlookIsFrontmost() }), let el = try? appElement() {
+      AXUIElementSetAttributeValue(el, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+      _ = waitUntil(1500, { outlookIsFrontmost() })
+    }
+    // Let the activation settle so the key window receives the input.
+    _ = waitUntil(250, { false })
+  }
   if !outlookIsFrontmost() { throw HelperError("Outlook is not the frontmost app; refusing to send \(what) to another application") }
 }
 
@@ -616,7 +629,9 @@ func handle(_ req: [String: Any]) throws -> Any {
   case "paste":
     // Put text (and optional HTML) on the pasteboard, invoke Edit > Paste (layout independent), then
     // restore the user's clipboard unless they copied something new meanwhile.
-    let text: String = try arg(req, "text")
+    // With "files": paste those files (as file URLs, like a copy in Finder) instead of text.
+    let files = (req["files"] as? [String]) ?? []
+    let text: String = files.isEmpty ? try arg(req, "text") : ""
     let app = try appElement()
     try requireFrontmost("a paste")
     guard let mb = attr(app, kAXMenuBarAttribute) else { throw HelperError("no menu bar") }
@@ -624,13 +639,23 @@ func handle(_ req: [String: Any]) throws -> Any {
     let snap = snapshotPasteboard()
     let pb = NSPasteboard.general
     pb.clearContents()
-    let item = NSPasteboardItem()
-    item.setString(text, forType: .string)
-    if let html = req["html"] as? String { item.setString(html, forType: .html) }
     // Ask clipboard managers not to record this temporary content.
-    item.setString("", forType: NSPasteboard.PasteboardType("org.nspasteboard.TransientType"))
-    item.setString("", forType: NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"))
-    pb.writeObjects([item])
+    let markers = [NSPasteboard.PasteboardType("org.nspasteboard.TransientType"), NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")]
+    if files.isEmpty {
+      let item = NSPasteboardItem()
+      item.setString(text, forType: .string)
+      if let html = req["html"] as? String { item.setString(html, forType: .html) }
+      for m in markers { item.setString("", forType: m) }
+      pb.writeObjects([item])
+    } else {
+      let items: [NSPasteboardItem] = files.map { path in
+        let item = NSPasteboardItem()
+        item.setString(URL(fileURLWithPath: path).absoluteString, forType: .fileURL)
+        for m in markers { item.setString("", forType: m) }
+        return item
+      }
+      pb.writeObjects(items)
+    }
     let ours = pb.changeCount
     defer {
       _ = waitUntil((req["settleMs"] as? Int) ?? 1200, { false })

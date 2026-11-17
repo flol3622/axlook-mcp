@@ -168,12 +168,12 @@ flowchart LR
 | | `outlook_search_messages` | 👻 | Outlook's own search (`from:`, `subject:`, `hasattachments:yes`…), per mailbox or across all accounts |
 | | `outlook_read_message` | 👻 | Headers, body text and links; leaves the message unread unless asked |
 | | `outlook_get_message_source` | 🪟 | Full RFC 822 source: Message-ID, all addresses, text and HTML, attachment list |
-| | `outlook_save_attachments` | 🪟 | Writes attachments to a folder (sanitized names, never overwrites) |
+| | `outlook_save_attachments` | 🪟 | Writes attachments to a folder (sanitized names, never overwrites); images shown inside the body only on request |
 | | `outlook_move_message` | 🪟 | Moves to any folder of any account and checks the move happened |
 | | `outlook_mark_read` · `outlook_set_flag` | 🪟 | Read/unread, flag/clear flag |
 | | `outlook_archive_message` · `outlook_delete_message` | 🪟 | Archive; delete moves to Deleted Items (drafts are discarded) |
-| **Drafts** | `outlook_create_draft` | 🪟 | To/Cc/Bcc, subject, text or HTML body, choice of From account |
-| | `outlook_create_reply_draft` · `outlook_create_forward_draft` | 🪟 | Your text above the quoted original. **Saved, never sent** |
+| **Drafts** | `outlook_create_draft` | 🪟 | To/Cc/Bcc, subject, text or HTML body, local files (images embedded, others attached), choice of From account |
+| | `outlook_create_reply_draft` · `outlook_create_forward_draft` | 🪟 | Your text above the quoted original, plus local files. **Saved, never sent**; a failed call leaves no draft behind |
 | **Calendar** | `outlook_list_calendars` | 👻 | Calendars of every account, and whether each is shown |
 | | `outlook_list_events` | 👻 | Time, location, recurrence, organizer, your response, attendees |
 | | `outlook_get_event` | 👻 / 🪟 | One event; `full=true` adds the calendar name, attendee list and description |

@@ -2,7 +2,7 @@
 import { existsSync, mkdirSync, renameSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { ax, bodyEditor, need, OutlookError, sleep, switchModule, until, withFocus } from "./session";
+import { ax, bodyEditor, need, OutlookError, pressMenu, sleep, switchModule, until, withFocus } from "./session";
 import { KEY, type AxNode } from "../ax";
 
 // ---------------------------------------------------------------------------------------------
@@ -178,7 +178,7 @@ export async function openFolder(folder: string): Promise<Folder> {
     return t === `${row.name} • ${row.account}`;
   }, 6000);
   if (!ok) throw new OutlookError(`Outlook did not open folder "${row.path}".`);
-  await waitListSettled();
+  await waitListSettled(row.total || row.unread ? 1 : 0);
   const { h, section, selected, ...f } = row;
   return f;
 }
@@ -232,7 +232,8 @@ export function parseRowDesc(desc: string): Omit<RowInfo, "h" | "group"> | null 
   if (subjIdx >= 0 && (noSubjIdx < 0 || subjIdx < noSubjIdx)) {
     sender = afterSender.slice(0, subjIdx);
     const body = afterSender.slice(subjIdx + ", Subject: ".length);
-    const end = body.search(/,\s{2,}/);
+    // Meeting responses ("Accepted: …, Meeting message,") separate the marker by a single space.
+    const end = body.search(/,\s{2,}|,\s*Meeting message(?=,|\s|$)/);
     subject = end >= 0 ? body.slice(0, end) : body.replace(/,\s*$/, "");
     rest = end >= 0 ? body.slice(end) : "";
   } else if (noSubjIdx >= 0) {
@@ -250,7 +251,8 @@ export function parseRowDesc(desc: string): Omit<RowInfo, "h" | "group"> | null 
   return {
     sender: sender.trim(),
     subject: subject.trim(),
-    date: mid.match(DATE_RE)?.[1] ?? "",
+    // Meeting invitations show the meeting's own date and time before the received date: take the last one.
+    date: [...mid.matchAll(new RegExp(DATE_RE.source, "g"))].pop()?.[1] ?? "",
     preview,
     unread: /\bUnread\b/.test(prefix) || !!unreadConvM,
     flagged: /\bFlagged\b/.test(mid),
@@ -269,24 +271,32 @@ async function messageTable(): Promise<AxNode> {
   return need("main", { role: "AXTable", desc: "Message List" }, "the message list", { depth: 8, timeoutMs: 4000 });
 }
 
-/** A fingerprint of the top of the message list, to notice when it re-renders. */
+/** A fingerprint of the message list (its first rows and how many rows it has), to notice when it changes. */
 async function listSignature(): Promise<string | null> {
   const t = await ax.findOne("main", { role: "AXTable", desc: "Message List" }, { depth: 8 });
   if (!t) return null;
   const cells = await ax.find(t.h, { role: "AXCell" }, { depth: 2, limit: 6 });
-  return cells.map((c) => c.desc ?? "").join("|") + `#${cells.length}`;
+  const rows = (await ax.call<AxNode[]>("elements", { h: t.h, attr: "AXRows" })).length;
+  return cells.map((c) => c.desc ?? "").join("|") + `#${rows}`;
 }
 
-async function waitListSettled() {
-  // The list re-renders after a folder switch or search; wait until two consecutive reads agree.
+async function waitListSettled(minRows = 0) {
+  // A folder that has messages may show an empty list for a moment after opening it.
+  if (minRows > 0) await until(async () => (await cellCount()) >= minRows, 8000, 250);
+  // The list re-renders after a folder switch or search, and fills in progressively: wait until it has not
+  // changed for a while.
   let last = "";
+  let since = Date.now();
   await until(async () => {
     const sig = await listSignature();
     if (sig === null) return false;
-    const stable = sig === last;
-    last = sig;
-    return stable;
-  }, 4000, 250);
+    if (sig !== last) {
+      last = sig;
+      since = Date.now();
+      return false;
+    }
+    return Date.now() - since >= 600;
+  }, 6000, 200);
 }
 
 function isGroupHeader(desc: string) {
@@ -389,10 +399,32 @@ function decodeRef(ref: string): RefData {
 }
 
 const previewKey = (preview: string) => preview.slice(0, 60);
+/** Outlook renders the same preview with different punctuation and spacing over time: compare letters and digits. */
+const previewWords = (preview: string) => preview.replace(/[^\p{L}\p{N}]+/gu, "").toLowerCase();
+export const samePreview = (rowPreview: string, refPreview: string) => previewWords(rowPreview).startsWith(previewWords(refPreview));
 const sameRow = (r: RowInfo, d: { s: string; n: string; d: string; p: string }) =>
-  r.subject === d.s && r.sender === d.n && r.date === d.d && previewKey(r.preview) === d.p;
+  r.subject === d.s && r.sender === d.n && r.date === d.d && samePreview(r.preview, d.p);
 const isConversation = (r: { conversationCount: number | null }) => (r.conversationCount ?? 0) >= 2;
-const stripPrefixes = (x: string) => x.replace(/^((re|fw|fwd|aw|tr|wg)\s*:\s*)+/i, "").trim();
+/**
+ * A subject without reply/forward prefixes, meeting-response prefixes and mailing-list tags ("[list] FW: …"):
+ * the message list often shows the bare topic while the reading pane shows the full subject.
+ */
+export const stripPrefixes = (x: string) =>
+  x
+    .replace(/^\s*((\[[^\]]{1,40}\]|(re|fw|fwd|aw|tr|wg|sv|vs|antw|rv|accepted|declined|tentative|tentatively accepted|canceled|cancelled|updated|new time proposed)\s*:)\s*)+/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+/** Whether a subject shown in the reading pane is the one of a list row. */
+export function sameSubject(shown: string | null, rowSubject: string): boolean {
+  if (shown === null) return false;
+  if (shown === rowSubject) return true;
+  if (rowSubject === "" && /^[(<]?no subject[)>]?$/i.test(shown.trim())) return true;
+  const a = stripPrefixes(shown);
+  const b = stripPrefixes(rowSubject);
+  // Other tags or prefixes (e.g. "[EXTERNAL]" in the middle) may still precede the topic.
+  return a === b || (b.length >= 8 && a.endsWith(b));
+}
 
 function toSummaries(rows: RowInfo[], f: string, q?: string): MessageSummary[] {
   const seen = new Map<string, number>();
@@ -400,7 +432,7 @@ function toSummaries(rows: RowInfo[], f: string, q?: string): MessageSummary[] {
     const p = previewKey(r.preview);
     const c = isConversation(r) ? r.conversationCount! : undefined;
     // Conversations are counted apart from single messages, as locate() matches them apart.
-    const key = `${r.subject}\u0000${r.sender}\u0000${r.date}\u0000${p}\u0000${c ? 1 : 0}`;
+    const key = `${r.subject}\u0000${r.sender}\u0000${r.date}\u0000${previewWords(p)}\u0000${c ? 1 : 0}`;
     const k = seen.get(key) ?? 0;
     seen.set(key, k + 1);
     const { h, thread, ...rest } = r;
@@ -522,13 +554,18 @@ async function expandConversation(row: RowInfo): Promise<RowInfo[]> {
  * the conversation is expanded.
  */
 function shownMessage(rows: RowInfo[], d: { s: string; d: string; p: string }): RowInfo[] {
-  const exact = rows.filter((r) => r.thread && r.date === d.d && previewKey(r.preview) === d.p);
+  const exact = rows.filter((r) => r.thread && r.date === d.d && samePreview(r.preview, d.p));
   return exact.length ? exact : rows.filter((r) => r.thread?.pos === 0 && r.date === d.d && stripPrefixes(r.subject) === stripPrefixes(d.s));
 }
 
 /** The rows a ref can stand for, and the collapsed conversations that may hide its message. */
 function candidates(rows: RowInfo[], data: RefData): RowInfo[] {
-  const same = rows.filter((r) => sameRow(r, data));
+  let same = rows.filter((r) => sameRow(r, data));
+  if (!same.length) {
+    // The preview may have changed (e.g. once the message body was downloaded): accept a unique match without it.
+    const loose = rows.filter((r) => r.subject === data.s && r.sender === data.n && r.date === data.d && !!r.conversationCount === !!data.c);
+    if (loose.length === 1) same = loose;
+  }
   const singles = same.filter((r) => !isConversation(r));
   const convs = same.filter(isConversation);
   if (!data.c) return singles.length ? singles : convs; // refs made before `c` existed may be conversations
@@ -590,7 +627,7 @@ async function locate(ref: string): Promise<Located> {
  * pass `single` to refuse conversation refs: selecting one makes Outlook open its newest item, which may
  * be a draft or a message in another folder.
  */
-async function openMessage(ref: string, opts: { single?: boolean } = {}): Promise<Located & { conversation?: MessageSummary[] }> {
+async function openMessage(ref: string, opts: { single?: boolean; received?: boolean } = {}): Promise<Located & { conversation?: MessageSummary[] }> {
   for (let attempt = 0; ; attempt++) {
     const loc = await locate(ref);
     let { row } = loc;
@@ -609,7 +646,12 @@ async function openMessage(ref: string, opts: { single?: boolean } = {}): Promis
       row = shown;
     }
     try {
-      await selectRow(row);
+      if (opts.received && isDraftRow(row, loc.data.f)) {
+        row = await openReceived(row, loc.data.f);
+      } else {
+        await selectRow(row);
+        if (opts.received && (await headerInfo()).draftSubject !== null) row = await openReceived(row, loc.data.f);
+      }
       return { ...loc, row, conversation };
     } catch (e) {
       // The list may have re-rendered under us (search results still loading): look the row up again once.
@@ -618,35 +660,76 @@ async function openMessage(ref: string, opts: { single?: boolean } = {}): Promis
   }
 }
 
+/** A saved draft: in a conversation its row is marked "Folder: Drafts"; in the Drafts folder itself, it is not. */
+function isDraftRow(r: RowInfo, folderPath: string) {
+  return r.folder ? /draft/i.test(r.folder) : /(^|\/)drafts?$/i.test(folderPath);
+}
+
+/**
+ * The row is a draft, where Outlook disables Reply and Forward. A reply saved earlier makes a conversation in
+ * which that draft is the newest item: open the newest received message of the same conversation instead.
+ */
+async function openReceived(draft: RowInfo, folderPath: string): Promise<RowInfo> {
+  const rows = await readRows(await messageTable());
+  const others = draft.thread
+    ? rows.filter((r) => r.thread?.id === draft.thread!.id && r.thread.pos !== draft.thread!.pos && !isDraftRow(r, folderPath))
+    : [];
+  for (const r of others) {
+    if (!(await selectRow(r).then(() => true, () => false))) continue;
+    if ((await headerInfo()).draftSubject === null) return r;
+  }
+  throw new OutlookError(
+    `This ref is a draft, not a received message${draft.thread ? ", and its conversation has no received message here" : ""}. Use the ref of the message to answer (list or search again). To change the draft itself, delete it and create a new one.`,
+  );
+}
+
 /** locate() for actions that first look at the row's state; conversation refs are refused (see openMessage). */
 async function locateSingle(ref: string): Promise<Located> {
   const loc = await locate(ref);
   return isConversation(loc.row) || (loc.data.c && loc.row.thread) ? openMessage(ref, { single: true }) : loc;
 }
 
-async function headerInfo(): Promise<{ subject: string | null; from: string | null; draftSubject: string | null }> {
-  const header = await ax.findOne("main", { id: "HeaderMainContainer" }, { depth: 7, subtree: 3 });
-  let subject: string | null = null;
-  let from: string | null = null;
-  if (header) {
-    subject = header.children?.find((c) => c.role === "AXStaticText")?.value ?? null;
-    const walk = (n: AxNode): void => {
-      if (n.id === "messageHeaderFromContent") from = n.value ?? null;
-      n.children?.forEach(walk);
-    };
-    walk(header);
+interface Header {
+  subject: string | null;
+  /** The header fields (from, recipients, date…), flattened. */
+  fields: AxNode[];
+}
+
+/**
+ * The reading pane's message header. Usually a "HeaderMainContainer" group; meeting messages lay the same parts
+ * out directly in the reading pane, so fall back to the parent of the header's Reply button.
+ */
+async function messageHeader(): Promise<Header | null> {
+  let root = await ax.findOne("main", { id: "HeaderMainContainer" }, { depth: 7 });
+  if (!root) {
+    const reply = await ax.findOne("main", { id: "messageHeaderContextualControlsReplyButton" }, { depth: 8 });
+    if (!reply) return null;
+    root = await ax.call<AxNode>("parent", { h: reply.h });
   }
+  // Only look at the header's own parts: in the fallback, the root also holds the message list.
+  const kids = await ax.children(root.h);
+  const subject = kids.find((c) => c.role === "AXStaticText")?.value ?? null;
+  const fields: AxNode[] = [];
+  const walk = (n: AxNode) => {
+    fields.push(n);
+    n.children?.forEach(walk);
+  };
+  for (const k of kids) if (k.role === "AXScrollArea" && k.desc === "Message Header Details") walk(await ax.tree(k.h, 3));
+  return { subject, fields };
+}
+
+async function headerInfo(): Promise<{ subject: string | null; from: string | null; draftSubject: string | null }> {
+  const header = await messageHeader();
+  const from = header?.fields.find((n) => n.id === "messageHeaderFromContent")?.value ?? null;
   // Drafts open as an editable form instead of a header.
   const draft = header ? null : await ax.findOne("main", { id: "subjectTextField" }, { depth: 9 });
-  return { subject, from, draftSubject: draft?.value ?? null };
+  return { subject: header?.subject ?? null, from, draftSubject: draft?.value ?? null };
 }
 
 /** Select a row and wait until the reading pane shows that exact message. */
 async function selectRow(row: RowInfo) {
   await ax.set(row.h, "AXSelected", true);
-  const norm = stripPrefixes;
-  const matchesSubject = (s: string | null) =>
-    s !== null && (s === row.subject || norm(s) === norm(row.subject) || (row.subject === "" && /^[(<]?no subject[)>]?$/i.test(s)));
+  const matchesSubject = (s: string | null) => sameSubject(s, row.subject);
   const ok = await until(async () => {
     const sel = await ax.get(row.h).catch(() => null);
     if (!sel?.selected) return false;
@@ -673,17 +756,22 @@ export interface MessageView {
   links: { text: string; url: string }[];
   attachments: string[];
   conversationMessages: number;
+  /** Meeting invitations and responses: the meeting's time and the response shown. */
+  meeting?: { when: string | null; response: string | null };
   unreadRestored?: boolean;
   /** When the ref was a conversation: its messages, newest first. The one read is the one its row showed. */
   conversation?: MessageSummary[];
 }
 
+// "…, Presence Unknown" in the usual header; a bare status ("…, Away") in meeting headers.
+const PRESENCE = /,\s*(Presence \w+|(Available|Away|Busy|Do not disturb|Be right back|Appear offline|Offline|Out of office|In a call|In a meeting|Presenting|Unknown)(?=,|$))/g;
+
 function cleanHeader(v: string | undefined, prefix: RegExp) {
-  return v ? v.replace(prefix, "").replace(/,\s*Presence \w+/g, "").trim() : null;
+  return v ? v.replace(prefix, "").replace(PRESENCE, "").trim() : null;
 }
 
 async function readReadingPane(): Promise<Omit<MessageView, "ref">> {
-  const header = await ax.findOne("main", { id: "HeaderMainContainer" }, { depth: 7 });
+  const header = await messageHeader();
   if (!header) {
     // A draft opened for editing.
     const subj = await need("main", { id: "subjectTextField" }, "the reading pane", { depth: 9 });
@@ -700,17 +788,15 @@ async function readReadingPane(): Promise<Omit<MessageView, "ref">> {
       conversationMessages: 1,
     };
   }
-  const tree = await ax.tree(header.h, 3);
-  const flat: AxNode[] = [];
-  const walk = (n: AxNode) => {
-    flat.push(n);
-    n.children?.forEach(walk);
-  };
-  walk(tree);
-  const subject = tree.children?.find((c) => c.role === "AXStaticText")?.value ?? "";
+  const flat = header.fields;
+  const subject = header.subject ?? "";
   const from = flat.find((n) => n.id === "messageHeaderFromContent")?.value;
-  const rcpt = flat.find((n) => n.id === "messageHeaderRecipientsContent")?.value;
+  // Meeting messages list "To:" recipients in their own field.
+  const to = flat.find((n) => n.id === "messageHeaderToContent")?.value;
+  const rcpt = flat.find((n) => n.id === "messageHeaderRecipientsContent")?.value ?? (to ? `To: ${to}` : undefined);
   const sent = flat.find((n) => n.id === "messageHeaderTimeStampContent")?.value ?? null;
+  const when = flat.find((n) => n.id === "messageHeaderWhenContent")?.value;
+  const response = flat.find((n) => n.id === "messageHeaderResponseStatusContent")?.value;
   const panes = await ax.find("main", { role: "AXWebArea", desc: "Reading Pane" }, { depth: 12, limit: 50 });
   const parts: string[] = [];
   const links: { text: string; url: string }[] = [];
@@ -719,15 +805,7 @@ async function readReadingPane(): Promise<Omit<MessageView, "ref">> {
     parts.push(t.text.trim());
     links.push(...t.links);
   }
-  const attachmentNodes = await ax.find("main", { idContains: "attachment" }, { depth: 12, limit: 50 });
-  const attachments = new Set<string>();
-  for (const a of attachmentNodes) {
-    const kids = await ax.find(a.h, { role: "AXButton" }, { depth: 3, limit: 50 });
-    for (const k of kids) {
-      const label = k.desc ?? k.title ?? "";
-      if (label && !/^(More|Download|Save|Preview|Show)/i.test(label)) attachments.add(label);
-    }
-  }
+  const attachments = await readAttachments();
   return {
     subject,
     from: cleanHeader(from, /^From:\s*/),
@@ -735,9 +813,27 @@ async function readReadingPane(): Promise<Omit<MessageView, "ref">> {
     sent,
     body: parts.filter(Boolean).join("\n\n— — —\n\n"),
     links,
-    attachments: [...attachments],
+    attachments,
     conversationMessages: panes.length,
+    ...(when || response ? { meeting: { when: when?.replace(/^When:\s*/, "") ?? null, response: response ?? null } } : {}),
   };
+}
+
+async function readAttachments(): Promise<string[]> {
+  const attachmentNodes = await ax.find("main", { idContains: "attachment" }, { depth: 12, limit: 50 });
+  const attachments = new Set<string>();
+  for (const a of attachmentNodes) {
+    // Current versions: a grid of tiles, each with an "Attachment name" text.
+    const names = await ax.find(a.h, { role: "AXStaticText", desc: "Attachment name" }, { depth: 4, limit: 50 });
+    for (const n of names) if (n.value) attachments.add(n.value);
+    if (names.length) continue;
+    const kids = await ax.find(a.h, { role: "AXButton" }, { depth: 3, limit: 50 });
+    for (const k of kids) {
+      const label = k.desc ?? k.title ?? "";
+      if (label && !/^(More|Download|Save|Preview|Show)/i.test(label)) attachments.add(label);
+    }
+  }
+  return [...attachments];
 }
 
 async function rowUnread(row: RowInfo): Promise<boolean | null> {
@@ -759,6 +855,13 @@ export async function readMessage(ref: string, opts: { markAsRead?: boolean } = 
   const { row, conversation } = await openMessage(ref);
   await sleep(300);
   const view = await readReadingPane();
+  if (row.hasAttachments && !view.attachments.length) {
+    // The attachment list appears once Outlook has downloaded the message.
+    view.attachments = (await until(async () => {
+      const a = await readAttachments();
+      return a.length ? a : null;
+    }, 8000, 400)) ?? [];
+  }
   const result: MessageView = { ref, ...view };
   if (conversation) result.conversation = conversation;
   if (row.unread && !opts.markAsRead) result.unreadRestored = await restoreUnread(row).catch(() => false);
@@ -801,7 +904,8 @@ export async function exportEml(ref: string, outPath?: string): Promise<string> 
   const saved = join(DOWNLOADS, `${token}.eml`);
   await withFocus(async () => {
     try {
-      await ax.menu(["File", "Save As..."]);
+      // Disabled until Outlook has downloaded the message (e.g. an archived Gmail message found by search).
+      await pressMenu(["File", "Save As..."], { timeoutMs: 30_000, why: "Outlook may still be downloading the message from the server. Retry in a moment." });
       const panel = await need("main", { id: "save-panel" }, "the Save As panel", { depth: 2, timeoutMs: 6000 });
       const name = await need(panel.h, { id: "saveAsNameTextField" }, "the file name field", { depth: 4 });
       const where = await ax.findOne(panel.h, { id: "where popup" }, { depth: 4 });

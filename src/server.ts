@@ -2,7 +2,7 @@
 // MCP server exposing New Outlook for Mac (mail, drafts, calendars) by driving its UI through Accessibility.
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { rmSync } from "node:fs";
+import { rmSync, statSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -77,6 +77,25 @@ const RO = { readOnlyHint: true, openWorldHint: false } as const;
 const WRITE = { readOnlyHint: false, destructiveHint: false, openWorldHint: false } as const;
 
 const expandHome = (p: string) => (p.startsWith("~") ? join(homedir(), p.slice(1)) : p);
+
+const attachments = z
+  .array(z.string())
+  .optional()
+  .describe("Local files to add (absolute or ~/ paths). Images are embedded in the body after your text; other files are attached.");
+
+/** Resolve attachment paths and check that each one is a readable file, before touching Outlook. */
+function localFiles(paths: string[] | undefined): string[] | undefined {
+  if (!paths?.length) return undefined;
+  return paths.map((p) => {
+    const abs = resolve(expandHome(p));
+    let ok = false;
+    try {
+      ok = statSync(abs).isFile();
+    } catch {}
+    if (!ok) throw new OutlookError(`Attachment not found or not a file: ${abs}`);
+    return abs;
+  });
+}
 
 // ------------------------------------------------------------------------------------------------
 // Diagnostics
@@ -205,12 +224,12 @@ server.registerTool(
   "outlook_save_attachments",
   {
     description:
-      "Download a message's attachments to a local folder (via the message's .eml export). By default saves all non-inline attachments; never overwrites files.",
+      "Download a message's attachments to a local folder (via the message's .eml export). By default saves every attachment except images shown inside the body (signatures, logos); never overwrites files.",
     inputSchema: {
       ref,
       directory: z.string().default("~/Downloads/Outlook Attachments").describe("Destination folder (created if missing)"),
       names: z.array(z.string()).optional().describe("Only these attachment file names"),
-      include_inline: z.boolean().default(false).describe("Also save inline images"),
+      include_inline: z.boolean().default(false).describe("Also save images shown inside the body (referenced by cid:)"),
     },
     annotations: WRITE,
   },
@@ -218,8 +237,14 @@ server.registerTool(
     const path = await mail.exportEml(a.ref);
     try {
       const msg = await parseEml(path);
-      const saved = await saveAttachments(path, resolve(expandHome(a.directory)), { names: a.names, includeInline: a.include_inline });
-      return { subject: msg.subject, attachmentsInMessage: msg.attachments.length, saved };
+      const { saved, skipped } = await saveAttachments(path, resolve(expandHome(a.directory)), { names: a.names, includeInline: a.include_inline });
+      const result: Record<string, unknown> = { subject: msg.subject, attachmentsInMessage: msg.attachments.length, saved };
+      if (skipped.length) {
+        const reason = a.names ? "not in names" : "image shown inside the body";
+        result.skipped = skipped.map(({ filename, mimeType, size }) => ({ filename, mimeType, size, reason }));
+        if (!saved.length) result.hint = a.names ? "Nothing saved: no attachment matched names." : "Nothing saved: pass include_inline: true, or names, to save the skipped parts.";
+      }
+      return result;
     } finally {
       rmSync(path, { force: true });
     }
@@ -293,12 +318,13 @@ server.registerTool(
       body: z.string().optional(),
       html: z.boolean().default(false).describe("Body is HTML"),
       from: z.string().optional().describe("Sending account e-mail address (defaults to the conventions' default_from, else Outlook's default account)"),
+      attachments,
     },
     annotations: WRITE,
   },
   run(async (a: compose.DraftInput) => {
     const from = a.from ?? conventionDefault("default_from");
-    const r = await compose.createDraft({ ...a, from });
+    const r = await compose.createDraft({ ...a, from, attachments: localFiles(a.attachments) });
     return { ...r, fromSource: a.from ? "argument" : from ? "conventions default_from" : "Outlook default" };
   }),
 );
@@ -307,11 +333,11 @@ server.registerTool(
   "outlook_create_reply_draft",
   {
     description: "Create a reply (or reply-all) draft to a message, with your text above the quoted original. Saved to Drafts, NOT sent.",
-    inputSchema: { ref, body: z.string(), reply_all: z.boolean().default(false), html: z.boolean().default(false) },
+    inputSchema: { ref, body: z.string(), reply_all: z.boolean().default(false), html: z.boolean().default(false), attachments },
     annotations: WRITE,
   },
-  run(async (a: { ref: string; body: string; reply_all: boolean; html: boolean }) =>
-    compose.respondDraft(a.ref, a.reply_all ? "replyAll" : "reply", a.body, { html: a.html }),
+  run(async (a: { ref: string; body: string; reply_all: boolean; html: boolean; attachments?: string[] }) =>
+    compose.respondDraft(a.ref, a.reply_all ? "replyAll" : "reply", a.body, { html: a.html, attachments: localFiles(a.attachments) }),
   ),
 );
 
@@ -319,10 +345,12 @@ server.registerTool(
   "outlook_create_forward_draft",
   {
     description: "Create a forward draft of a message (attachments included by Outlook). Saved to Drafts, NOT sent.",
-    inputSchema: { ref, to: z.array(z.string()).default([]), body: z.string().default(""), html: z.boolean().default(false) },
+    inputSchema: { ref, to: z.array(z.string()).default([]), body: z.string().default(""), html: z.boolean().default(false), attachments },
     annotations: WRITE,
   },
-  run(async (a: { ref: string; to: string[]; body: string; html: boolean }) => compose.respondDraft(a.ref, "forward", a.body, { to: a.to, html: a.html })),
+  run(async (a: { ref: string; to: string[]; body: string; html: boolean; attachments?: string[] }) =>
+    compose.respondDraft(a.ref, "forward", a.body, { to: a.to, html: a.html, attachments: localFiles(a.attachments) }),
+  ),
 );
 
 // ------------------------------------------------------------------------------------------------

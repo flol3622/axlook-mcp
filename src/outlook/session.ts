@@ -175,11 +175,18 @@ export async function newWindow(before: AxNode[], accept: (w: AxNode) => boolean
   return now.find((w) => accept(w) && count(now, w.title) > count(before, w.title)) ?? null;
 }
 
-/** The real body editor under `root`: Outlook also keeps tiny off-screen text areas, so take the largest. */
+/**
+ * The real body editor under `root`: Outlook also keeps tiny or off-screen text areas, so take the largest one
+ * inside the root's frame. Frames are global screen coordinates (a display left of or above the main one has
+ * negative ones), so compare with the root's own frame rather than with fixed bounds.
+ */
 export async function bodyEditor(root: string, timeoutMs = 5000): Promise<AxNode> {
   const pick = async () => {
-    const areas = await ax.find(root, { role: "AXTextArea" }, { depth: 14, limit: 20, frame: true });
-    const visible = areas.filter((a) => a.frame && a.frame.w > 50 && a.frame.h >= 10 && a.frame.x > -1000);
+    const box = (await ax.get(root, { frame: true }).catch(() => null))?.frame;
+    const areas = await ax.find(root, { role: "AXTextArea" }, { depth: 16, limit: 20, frame: true });
+    const inside = (f: NonNullable<AxNode["frame"]>) =>
+      !box || (f.x + f.w > box.x && f.x < box.x + box.w && f.y + f.h > box.y && f.y < box.y + box.h);
+    const visible = areas.filter((a) => a.frame && a.frame.w > 50 && a.frame.h >= 10 && inside(a.frame));
     return visible.sort((a, b) => b.frame!.w * b.frame!.h - a.frame!.w * a.frame!.h)[0] ?? null;
   };
   const area = await until(pick, timeoutMs, 250);
@@ -188,12 +195,52 @@ export async function bodyEditor(root: string, timeoutMs = 5000): Promise<AxNode
 }
 
 /**
+ * Press a menu item, waiting for Outlook to enable it. Items stay disabled while a message is still being
+ * downloaded, while a window that was just opened is not yet key, or while another app took the focus back.
+ */
+export async function pressMenu(path: string[], opts: { timeoutMs?: number; why?: string } = {}) {
+  const deadline = Date.now() + (opts.timeoutMs ?? 8000);
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await ax.menu(path, true);
+      break;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!/menu item disabled/.test(msg)) throw e;
+      if (Date.now() >= deadline) {
+        throw new OutlookError(`Outlook kept ${path.join(" > ")} disabled${opts.why ? `: ${opts.why}` : "."}`);
+      }
+      if (attempt % 3 === 2) await bringToFront().catch(() => {});
+      await sleep(400);
+    }
+  }
+  return ax.menu(path);
+}
+
+/** Make `win` the key window (so menus and typing apply to it) and wait until it is. */
+export async function focusWindow(win: AxNode, timeoutMs = 3000): Promise<boolean> {
+  // Every lookup returns a new handle, so compare the windows by title and frame.
+  const sig = (w: AxNode | null) => (w ? `${w.id ?? ""}|${w.title ?? ""}|${JSON.stringify(w.frame)}` : null);
+  const isKey = async () => {
+    const [f, w] = await Promise.all([ax.get("focusedWindow", { frame: true }).catch(() => null), ax.get(win.h, { frame: true }).catch(() => null)]);
+    return !!f && !!w && sig(f) === sig(w);
+  };
+  if (await isKey()) return true;
+  await ax.press(win.h, "AXRaise").catch(() => {});
+  await ax.set(win.h, "AXMain", true).catch(() => {});
+  return !!(await until(isKey, timeoutMs, 150));
+}
+
+/**
  * Focus a text area, optionally move the caret to the start or select everything, paste text (and HTML),
  * and verify the text arrived. Retries once; a freshly opened editor may not take focus immediately.
  */
 export async function pasteInto(area: AxNode, text: string, opts: { html?: string; mode?: "start" | "replace" } = {}) {
   const probe = text.split(/\r?\n/).find((l) => l.trim().length > 3)?.trim().slice(0, 30);
+  const arrived = async () => !!probe && (await ax.text(area.h)).text.replace(/\s+/g, " ").includes(probe.replace(/\s+/g, " "));
   for (let attempt = 0; attempt < 2; attempt++) {
+    // A slow first paste may land late: never paste twice.
+    if (attempt > 0 && (await until(arrived, 3000, 300))) return;
     const focused = await until(async () => {
       await ax.set(area.h, "AXFocused", true);
       return (await ax.get(area.h, { attrs: ["AXFocused"] })).attrs?.AXFocused === true;
@@ -205,7 +252,7 @@ export async function pasteInto(area: AxNode, text: string, opts: { html?: strin
     await sleep(150);
     await ax.paste(text, opts.html);
     if (!probe) return;
-    if (await until(async () => (await ax.text(area.h)).text.includes(probe), 4000, 250)) {
+    if (await until(arrived, 4000, 250)) {
       await sleep(600); // let Outlook's editor commit the change
       return;
     }
