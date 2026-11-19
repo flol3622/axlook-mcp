@@ -2,6 +2,9 @@
 // focus management and module (Mail / Calendar) switching.
 import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile } from "node:child_process";
+import { closeSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { AxClient, KEY, type AxNode, type Match } from "../ax";
 
 export class OutlookError extends Error {}
@@ -24,18 +27,77 @@ ax.guard = checkCancelled;
 
 let queue: Promise<unknown> = Promise.resolve();
 let queued = 0;
-let current: { label: string; since: number } | null = null;
+let current: { label: string; since: number; waitingForOtherSession: boolean } | null = null;
 
 /** What the queue is doing, without waiting for it. */
-export function busy(): { tool: string; runningForSeconds: number; queued: number } | null {
-  return current ? { tool: current.label, runningForSeconds: Math.round((Date.now() - current.since) / 1000), queued } : null;
+export function busy(): { tool: string; runningForSeconds: number; queued: number; waitingForOtherSession: boolean } | null {
+  return current
+    ? { tool: current.label, runningForSeconds: Math.round((Date.now() - current.since) / 1000), queued, waitingForOtherSession: current.waitingForOtherSession }
+    : null;
+}
+
+// Cross-process lock -----------------------------------------------------------------------------
+// Every Claude session starts its own server, and they all drive the same Outlook window: one session's search
+// or folder switch would pull the list from under another's. A lock file makes them take turns.
+
+const LOCK = join(tmpdir(), `axlook-ui-${process.getuid?.() ?? "user"}.lock`);
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+function releaseUiLock() {
+  try {
+    if (readFileSync(LOCK, "utf8") === String(process.pid)) unlinkSync(LOCK);
+  } catch {}
+}
+process.on("exit", releaseUiLock);
+
+/** Take the lock, waiting up to `timeoutMs` for another server to finish its call. */
+async function acquireUiLock(timeoutMs: number, onWait: () => void): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (let waited = false; ; ) {
+    try {
+      const fd = openSync(LOCK, "wx");
+      writeSync(fd, String(process.pid));
+      closeSync(fd);
+      return;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") return; // no usable temp dir: run unlocked
+    }
+    let holder = 0;
+    try {
+      holder = Number(readFileSync(LOCK, "utf8"));
+    } catch {
+      continue; // released meanwhile
+    }
+    if (holder === process.pid || !holder || !alive(holder)) {
+      // Ours from a call that could not release it, or left by a server that died: take it over.
+      try {
+        unlinkSync(LOCK);
+      } catch {}
+      continue;
+    }
+    if (Date.now() >= deadline) {
+      throw new OutlookError("Another Claude session is using Outlook through axlook and did not finish in time; retry in a moment.");
+    }
+    if (!waited) onWait();
+    waited = true;
+    await sleep(250);
+  }
 }
 
 /** Default overall deadline of one tool call; AXLOOK_CALL_TIMEOUT (seconds) overrides it. */
 export const CALL_TIMEOUT_MS = (Number(process.env.AXLOOK_CALL_TIMEOUT) || 90) * 1000;
 
 /**
- * Run UI work strictly one call at a time. Handles from previous calls are released first.
+ * Run UI work strictly one call at a time, also across servers of other sessions (see the lock above). Handles
+ * from previous calls are released first.
  * Each call has an overall deadline: past it, the call fails, its remaining helper commands and polls are
  * refused, and the helper is restarted, so one stuck call cannot hold the queue (and Outlook) for minutes.
  */
@@ -46,7 +108,14 @@ export function exclusive<T>(fn: () => Promise<T>, opts: { label?: string; timeo
   const run = queue.then(async () => {
     queued--;
     const ctx: CallContext = { label, cancelled: false };
-    current = { label, since: Date.now() };
+    current = { label, since: Date.now(), waitingForOtherSession: false };
+    try {
+      await acquireUiLock(timeoutMs, () => current && (current.waitingForOtherSession = true));
+    } catch (e) {
+      current = null;
+      throw e;
+    }
+    if (current) current.waitingForOtherSession = false;
     const work = callContext.run(ctx, async () => {
       await ax.call("release").catch(() => {});
       return fn();
@@ -71,6 +140,7 @@ export function exclusive<T>(fn: () => Promise<T>, opts: { label?: string; timeo
     } finally {
       clearTimeout(timer);
       current = null;
+      releaseUiLock();
     }
   });
   queue = run.catch(() => {});
