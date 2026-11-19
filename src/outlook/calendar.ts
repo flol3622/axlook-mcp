@@ -163,14 +163,14 @@ function to24(t: string) {
 // Grid navigation
 
 async function header(): Promise<{ text: string; range: { start: Date; end: Date } }> {
-  const h = await need("main", { id: "cal_grid_header_date_range" }, "the calendar date header", { depth: 2 });
+  const h = await need("main", { id: "cal_grid_header_date_range" }, "the calendar date header", { depth: 5 });
   const range = parseRange(h.value ?? "");
   if (!range) throw new OutlookError(`Unrecognised calendar header "${h.value}".`);
   return { text: h.value ?? "", range };
 }
 
 async function ensureWeekView() {
-  const sw = await need("main", { id: "cal_grid_header_view_switcher" }, "the calendar view switcher", { depth: 2 });
+  const sw = await need("main", { id: "cal_grid_header_view_switcher" }, "the calendar view switcher", { depth: 5 });
   if (sw.title === "Week") return;
   await withFocus(async () => {
     await ax.press(sw.h);
@@ -178,7 +178,7 @@ async function ensureWeekView() {
     if (item.ok && item.node) await ax.press(item.node.h);
     await sleep(600);
   });
-  const ok = await until(async () => (await ax.findOne("main", { id: "cal_grid_header_view_switcher" }, { depth: 2 }))?.title === "Week", 4000);
+  const ok = await until(async () => (await ax.findOne("main", { id: "cal_grid_header_view_switcher" }, { depth: 5 }))?.title === "Week", 4000);
   if (!ok) throw new OutlookError("Please switch Outlook's calendar to Week view (the server could not do it).");
 }
 
@@ -193,12 +193,12 @@ async function goToWeek(date: Date) {
     const forward = date > end;
     // Large jumps: start from today first.
     if (guard === 0 && Math.abs(date.getTime() - range.start.getTime()) > 1000 * 86400 * 70) {
-      const today = await need("main", { id: "cal_grid_header_today" }, "the Today button", { depth: 2 });
+      const today = await need("main", { id: "cal_grid_header_today" }, "the Today button", { depth: 5 });
       await ax.press(today.h);
       await until(async () => (await header()).text !== text, 3000);
       continue;
     }
-    const btn = await need("main", { id: forward ? "cal_grid_header_next" : "cal_grid_header_previous" }, "the week navigation buttons", { depth: 2 });
+    const btn = await need("main", { id: forward ? "cal_grid_header_next" : "cal_grid_header_previous" }, "the week navigation buttons", { depth: 5 });
     await ax.press(btn.h);
     const changed = await until(async () => (await header()).text !== text, 4000, 100);
     if (!changed) throw new OutlookError("The calendar did not move to the next week.");

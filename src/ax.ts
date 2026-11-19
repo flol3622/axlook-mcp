@@ -47,6 +47,8 @@ export class AxClient {
   private pending = new Map<number, Pending>();
   private nextId = 1;
   private buffer = "";
+  /** Called before every command; throws to stop work that was abandoned (see session.exclusive). */
+  guard: (() => void) | null = null;
 
   private start() {
     if (!existsSync(HELPER_PATH)) {
@@ -95,6 +97,11 @@ export class AxClient {
   }
 
   call<T = any>(cmd: string, args: Record<string, unknown> = {}, timeoutMs = 30_000): Promise<T> {
+    try {
+      this.guard?.();
+    } catch (e) {
+      return Promise.reject(e);
+    }
     if (!this.proc) this.start();
     const proc = this.proc!;
     const id = this.nextId++;

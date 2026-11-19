@@ -6,7 +6,7 @@ import { rmSync, statSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { ax, exclusive, OutlookError, status, windows } from "./outlook/session";
+import { ax, busy, CALL_TIMEOUT_MS, exclusive, OutlookError, status, windows } from "./outlook/session";
 import * as mail from "./outlook/mail";
 import * as compose from "./outlook/compose";
 import * as cal from "./outlook/calendar";
@@ -32,7 +32,7 @@ function conventionDefault(key: "default_calendar" | "default_from"): string | u
   }
 }
 
-const server = new McpServer(
+const mcp = new McpServer(
   { name: "axlook", version: pkg.version },
   {
     instructions: [
@@ -60,16 +60,46 @@ function fail(e: unknown) {
   return { content: [{ type: "text" as const, text: msg }], isError: true };
 }
 
-/** Wrap a handler: serialize UI access and convert errors into tool errors. */
-function run<A>(fn: (args: A) => Promise<unknown>) {
-  return async (args: A) => {
+/**
+ * Wrap a handler: serialize UI access under an overall deadline and convert errors into tool errors.
+ * `slow` calls (exports that wait for Outlook to write a file, drafts with attachments) get three times the
+ * default deadline.
+ */
+function run<A>(fn: (args: A) => Promise<unknown>, opts: { slow?: boolean } = {}) {
+  let label = "call";
+  const handler = async (args: A) => {
     try {
-      return ok(await exclusive(() => fn(args)));
+      return ok(await exclusive(() => fn(args), { label, timeoutMs: CALL_TIMEOUT_MS * (opts.slow ? 3 : 1) }));
     } catch (e) {
       return fail(e);
     }
   };
+  return Object.assign(handler, { named: (name: string) => ((label = name), handler) });
 }
+
+/** A handler that bypasses the queue (only for calls that must answer while another one runs). */
+run.direct = <A>(fn: (args: A) => Promise<unknown>) => {
+  const handler = async (args: A) => {
+    try {
+      return ok(await fn(args));
+    } catch (e) {
+      return fail(e);
+    }
+  };
+  return Object.assign(handler, { named: () => handler });
+};
+
+/** Registers tools under their names, so a timeout or `busy` can say which tool it was. */
+const server = {
+  registerTool(
+    name: string,
+    config: { description: string; inputSchema: Record<string, z.ZodType>; annotations?: Record<string, boolean> },
+    handler: ((args: any) => Promise<unknown>) & { named?: (name: string) => unknown },
+  ) {
+    // The SDK's generic schema inference does not see through this wrapper; the handlers type their own args.
+    mcp.registerTool(name, config as any, (handler.named?.(name) ?? handler) as any);
+  },
+};
 
 const ref = z.string().describe("Message ref returned by outlook_list_messages / outlook_search_messages");
 const eventRef = z.string().describe("Event ref returned by outlook_list_events");
@@ -107,7 +137,11 @@ server.registerTool(
     inputSchema: {},
     annotations: RO,
   },
-  run(async () => {
+  // Not queued: it must answer while another call is running.
+  run.direct(async () => {
+    const running = busy();
+    // The helper serves one command at a time: do not wait behind a stuck call.
+    if (running) return { busy: running, note: "Another call is running; calls are serialized. Status of Outlook itself is not checked meanwhile." };
     const st = await status();
     const front = await ax.call("frontmost");
     return {
@@ -115,7 +149,7 @@ server.registerTool(
       screenLocked: front?.bundleId === "com.apple.loginwindow",
       windows: st.trusted && st.outlookRunning ? (await windows()).map((w) => ({ title: w.title, id: w.id, main: !!w.main })) : [],
     };
-  }),
+  })
 );
 
 server.registerTool(
@@ -217,7 +251,7 @@ server.registerTool(
     } finally {
       if (!target) rmSync(path, { force: true });
     }
-  }),
+  }, { slow: true }),
 );
 
 server.registerTool(
@@ -248,7 +282,7 @@ server.registerTool(
     } finally {
       rmSync(path, { force: true });
     }
-  }),
+  }, { slow: true }),
 );
 
 server.registerTool(
@@ -326,7 +360,7 @@ server.registerTool(
     const from = a.from ?? conventionDefault("default_from");
     const r = await compose.createDraft({ ...a, from, attachments: localFiles(a.attachments) });
     return { ...r, fromSource: a.from ? "argument" : from ? "conventions default_from" : "Outlook default" };
-  }),
+  }, { slow: true }),
 );
 
 server.registerTool(
@@ -338,6 +372,7 @@ server.registerTool(
   },
   run(async (a: { ref: string; body: string; reply_all: boolean; html: boolean; attachments?: string[] }) =>
     compose.respondDraft(a.ref, a.reply_all ? "replyAll" : "reply", a.body, { html: a.html, attachments: localFiles(a.attachments) }),
+    { slow: true },
   ),
 );
 
@@ -350,6 +385,7 @@ server.registerTool(
   },
   run(async (a: { ref: string; to: string[]; body: string; html: boolean; attachments?: string[] }) =>
     compose.respondDraft(a.ref, "forward", a.body, { to: a.to, html: a.html, attachments: localFiles(a.attachments) }),
+    { slow: true },
   ),
 );
 
@@ -493,7 +529,7 @@ server.registerTool(
 // ------------------------------------------------------------------------------------------------
 
 const transport = new StdioServerTransport();
-await server.connect(transport);
+await mcp.connect(transport);
 process.on("SIGINT", () => {
   ax.close();
   process.exit(0);

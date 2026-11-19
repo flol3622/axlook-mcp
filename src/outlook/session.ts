@@ -1,5 +1,6 @@
 // Shared Outlook UI session: one Accessibility helper, one queue (the UI is a single shared resource),
 // focus management and module (Mail / Calendar) switching.
+import { AsyncLocalStorage } from "node:async_hooks";
 import { execFile } from "node:child_process";
 import { AxClient, KEY, type AxNode, type Match } from "../ax";
 
@@ -7,16 +8,87 @@ export class OutlookError extends Error {}
 
 export const ax = new AxClient();
 
-let queue: Promise<unknown> = Promise.resolve();
+/** The tool call a piece of UI work belongs to; set `cancelled` once its deadline has passed. */
+interface CallContext {
+  label: string;
+  cancelled: boolean;
+}
+const callContext = new AsyncLocalStorage<CallContext>();
 
-/** Run UI work strictly one call at a time. Handles from previous calls are released first. */
-export function exclusive<T>(fn: () => Promise<T>): Promise<T> {
+/** Stop work whose call was abandoned, at its next helper command or poll. */
+export function checkCancelled() {
+  const c = callContext.getStore();
+  if (c?.cancelled) throw new OutlookError(`${c.label} was cancelled after its deadline.`);
+}
+ax.guard = checkCancelled;
+
+let queue: Promise<unknown> = Promise.resolve();
+let queued = 0;
+let current: { label: string; since: number } | null = null;
+
+/** What the queue is doing, without waiting for it. */
+export function busy(): { tool: string; runningForSeconds: number; queued: number } | null {
+  return current ? { tool: current.label, runningForSeconds: Math.round((Date.now() - current.since) / 1000), queued } : null;
+}
+
+/** Default overall deadline of one tool call; AXLOOK_CALL_TIMEOUT (seconds) overrides it. */
+export const CALL_TIMEOUT_MS = (Number(process.env.AXLOOK_CALL_TIMEOUT) || 90) * 1000;
+
+/**
+ * Run UI work strictly one call at a time. Handles from previous calls are released first.
+ * Each call has an overall deadline: past it, the call fails, its remaining helper commands and polls are
+ * refused, and the helper is restarted, so one stuck call cannot hold the queue (and Outlook) for minutes.
+ */
+export function exclusive<T>(fn: () => Promise<T>, opts: { label?: string; timeoutMs?: number } = {}): Promise<T> {
+  const label = opts.label ?? "call";
+  const timeoutMs = opts.timeoutMs ?? CALL_TIMEOUT_MS;
+  queued++;
   const run = queue.then(async () => {
-    await ax.call("release").catch(() => {});
-    return fn();
+    queued--;
+    const ctx: CallContext = { label, cancelled: false };
+    current = { label, since: Date.now() };
+    const work = callContext.run(ctx, async () => {
+      await ax.call("release").catch(() => {});
+      return fn();
+    });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new OutlookError(
+      `${label} timed out after ${Math.round(timeoutMs / 1000)} s; Outlook may be busy or showing something unexpected. Later calls start from a fresh state.`,
+    );
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(timedOut), timeoutMs);
+    });
+    try {
+      return await Promise.race([work, deadline]);
+    } catch (e) {
+      if (e === timedOut) {
+        ctx.cancelled = true;
+        ax.close(); // ends a helper command that is stuck inside Outlook
+        await settled(work, 15_000);
+        await resetUi().catch(() => {});
+      }
+      throw e;
+    } finally {
+      clearTimeout(timer);
+      current = null;
+    }
   });
   queue = run.catch(() => {});
   return run;
+}
+
+/** Whether `p` settles within `ms`. */
+function settled(p: Promise<unknown>, ms: number): Promise<boolean> {
+  return Promise.race([p.then(() => true, () => true), sleep(ms).then(() => false)]);
+}
+
+/** After an abandoned call: close a sheet or menu it may have left open in the main window. */
+async function resetUi() {
+  const sheet = await ax.findOne("main", { role: "AXSheet" }, { depth: 1 });
+  const cancel = sheet ? await ax.findOne(sheet.h, { role: "AXButton", titleRegex: "^Cancel$" }, { depth: 3 }) : null;
+  if (cancel) await ax.press(cancel.h).catch(() => {});
+  const menu = await ax.findOne("app", { role: "AXMenu" }, { depth: 3 }).catch(() => null);
+  if (menu) await ax.call("press", { h: menu.h, action: "AXCancel" }).catch(() => {});
 }
 
 export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -30,6 +102,7 @@ export function openApp(args: string[]): Promise<void> {
 export async function until<T>(fn: () => Promise<T | null | undefined | false>, timeoutMs = 5000, everyMs = 120): Promise<T | null> {
   const deadline = Date.now() + timeoutMs;
   while (true) {
+    checkCancelled();
     const v = await fn().catch(() => null);
     if (v) return v as T;
     if (Date.now() >= deadline) return null;
@@ -111,7 +184,8 @@ export async function withFocus<T>(fn: () => Promise<T>): Promise<T> {
     focusDepth--;
     const prev = res.previous;
     if (prev?.pid && prev.bundleId !== "com.microsoft.Outlook" && process.env.AXLOOK_KEEP_FOCUS !== "1") {
-      await ax.call("restore", { pid: prev.pid }).catch(() => {});
+      // Give the focus back even when the call was cancelled meanwhile.
+      await callContext.exit(() => ax.call("restore", { pid: prev.pid })).catch(() => {});
     }
   }
 }
@@ -127,20 +201,36 @@ export async function bringToFront() {
 
 export type Module = "Mail" | "Calendar";
 
-/** Switch the main window to the Mail or Calendar module (works in the background). */
-export async function switchModule(mod: Module): Promise<AxNode> {
-  const w = await mainWindow();
-  const isThere = async () => {
-    if (mod === "Calendar") return ax.findOne("main", { id: "cal_grid_header_view_switcher" }, { depth: 2 });
-    return ax.findOne("main", { role: "AXTable", desc: "Message List" }, { depth: 8 });
-  };
-  if (await isThere()) return w;
+/** Whether the main window shows the Mail or Calendar module. */
+async function inModule(mod: Module): Promise<boolean> {
+  if (mod === "Calendar") {
+    // The header's controls move into nested groups when the window is narrow or a pane is open.
+    return !!(await ax.findOne("main", { idRegex: "^cal_grid_header_(view_switcher|today|date_range)$" }, { depth: 5 }));
+  }
+  return !!(await ax.findOne("main", { role: "AXTable", desc: "Message List" }, { depth: 8 }));
+}
+
+async function pressModuleButton(mod: Module) {
   const btn = await ax.findOne("main", { role: "AXButton", help: mod }, { depth: 3 });
   if (!btn) throw new OutlookError(`Could not find the ${mod} button in Outlook's sidebar.`);
   await ax.press(btn.h);
-  const ok = await until(isThere, 6000);
-  if (!ok) throw new OutlookError(`Outlook did not switch to ${mod}.`);
-  return (await mainWindow());
+}
+
+/** Switch the main window to the Mail or Calendar module (works in the background). */
+export async function switchModule(mod: Module): Promise<AxNode> {
+  const w = await mainWindow();
+  if (await inModule(mod)) return w;
+  await pressModuleButton(mod);
+  if (!(await until(() => inModule(mod), 6000))) {
+    // Pressing the button of the module already shown does nothing, and that module can be in a state the
+    // check above does not recognise (e.g. an item open in it): go through the other module and back.
+    const other: Module = mod === "Mail" ? "Calendar" : "Mail";
+    await pressModuleButton(other);
+    await until(() => inModule(other), 6000);
+    await pressModuleButton(mod);
+    if (!(await until(() => inModule(mod), 8000))) throw new OutlookError(`Outlook did not switch to ${mod}.`);
+  }
+  return mainWindow();
 }
 
 export async function mainTitle(): Promise<string> {
