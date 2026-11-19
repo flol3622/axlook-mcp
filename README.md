@@ -254,6 +254,7 @@ default_from: you@work.example
 - **English UI only.** Labels such as "Message List" and the menu titles are matched; localization is future work.
 - **Speed.** Calls take 2–15 seconds, since this is UI automation. Search waits for Outlook's server-side results.
 - **Deadline.** Each call fails after 90 s (270 s for exports and drafts) instead of holding the queue; set `AXLOOK_CALL_TIMEOUT` (seconds) to change it. `outlook_status` answers even while another call runs, and then reports it as `busy`.
+- **Several sessions.** Each Claude session runs its own server; they take turns on Outlook through a lock file, so one session's search cannot pull the list from under another's.
 - **Read-only meetings.** Meetings with attendees can't be created or edited, because that would send mail.
 - **Recurring events.** Edits and deletes apply to the selected occurrence.
 - **Shared screen.** 🪟 tools take Outlook's window for a few seconds. If you switch apps mid-action, axlook re-activates Outlook once, then fails cleanly.

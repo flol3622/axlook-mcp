@@ -5866,7 +5866,7 @@ var require_dist = __commonJS((exports, module) => {
 
 // src/server.ts
 import { homedir as homedir4 } from "os";
-import { join as join5, resolve as resolve3 } from "path";
+import { join as join7, resolve as resolve3 } from "path";
 import { rmSync, statSync as statSync3 } from "fs";
 
 // node_modules/zod/v3/helpers/util.js
@@ -30040,6 +30040,9 @@ class StdioServerTransport {
 }
 // src/outlook/session.ts
 import { AsyncLocalStorage } from "node:async_hooks";
+import { closeSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join as join2 } from "node:path";
 
 // src/ax.ts
 import { spawn } from "node:child_process";
@@ -30190,7 +30193,52 @@ function checkCancelled() {
 ax.guard = checkCancelled;
 var queue = Promise.resolve(), queued = 0, current = null;
 function busy() {
-  return current ? { tool: current.label, runningForSeconds: Math.round((Date.now() - current.since) / 1000), queued } : null;
+  return current ? { tool: current.label, runningForSeconds: Math.round((Date.now() - current.since) / 1000), queued, waitingForOtherSession: current.waitingForOtherSession } : null;
+}
+var LOCK = join2(tmpdir(), `axlook-ui-${process.getuid?.() ?? "user"}.lock`);
+function alive(pid) {
+  try {
+    return process.kill(pid, 0), !0;
+  } catch (e) {
+    return e.code === "EPERM";
+  }
+}
+function releaseUiLock() {
+  try {
+    if (readFileSync(LOCK, "utf8") === String(process.pid))
+      unlinkSync(LOCK);
+  } catch {}
+}
+process.on("exit", releaseUiLock);
+async function acquireUiLock(timeoutMs, onWait) {
+  let deadline = Date.now() + timeoutMs;
+  for (let waited = !1;; ) {
+    try {
+      let fd = openSync(LOCK, "wx");
+      writeSync(fd, String(process.pid)), closeSync(fd);
+      return;
+    } catch (e) {
+      if (e.code !== "EEXIST")
+        return;
+    }
+    let holder = 0;
+    try {
+      holder = Number(readFileSync(LOCK, "utf8"));
+    } catch {
+      continue;
+    }
+    if (holder === process.pid || !holder || !alive(holder)) {
+      try {
+        unlinkSync(LOCK);
+      } catch {}
+      continue;
+    }
+    if (Date.now() >= deadline)
+      throw new OutlookError("Another Claude session is using Outlook through axlook and did not finish in time; retry in a moment.");
+    if (!waited)
+      onWait();
+    waited = !0, await sleep(250);
+  }
 }
 var CALL_TIMEOUT_MS = (Number(process.env.AXLOOK_CALL_TIMEOUT) || 90) * 1000;
 function exclusive(fn, opts = {}) {
@@ -30199,7 +30247,14 @@ function exclusive(fn, opts = {}) {
   let run = queue.then(async () => {
     queued--;
     let ctx = { label, cancelled: !1 };
-    current = { label, since: Date.now() };
+    current = { label, since: Date.now(), waitingForOtherSession: !1 };
+    try {
+      await acquireUiLock(timeoutMs, () => current && (current.waitingForOtherSession = !0));
+    } catch (e) {
+      throw current = null, e;
+    }
+    if (current)
+      current.waitingForOtherSession = !1;
     let work = callContext.run(ctx, async () => {
       return await ax.call("release").catch(() => {}), fn();
     }), timer, timedOut = new OutlookError(`${label} timed out after ${Math.round(timeoutMs / 1000)} s; Outlook may be busy or showing something unexpected. Later calls start from a fresh state.`), deadline = new Promise((_, reject) => {
@@ -30212,7 +30267,7 @@ function exclusive(fn, opts = {}) {
         ctx.cancelled = !0, ax.close(), await settled(work, 15000), await resetUi().catch(() => {});
       throw e;
     } finally {
-      clearTimeout(timer), current = null;
+      clearTimeout(timer), current = null, releaseUiLock();
     }
   });
   return queue = run.catch(() => {}), run;
@@ -30238,13 +30293,16 @@ async function windows() {
 
 // src/outlook/mail.ts
 import { createHash } from "node:crypto";
-import { existsSync as existsSync2, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
-import { join as join2 } from "node:path";
+import { existsSync as existsSync2, mkdirSync, readFileSync as readFileSync3, renameSync, statSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir as tmpdir3 } from "node:os";
+import { join as join4 } from "node:path";
 
 // src/outlook/session.ts
 import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
 import { execFile } from "node:child_process";
+import { closeSync as closeSync2, openSync as openSync2, readFileSync as readFileSync2, unlinkSync as unlinkSync2, writeSync as writeSync2 } from "node:fs";
+import { tmpdir as tmpdir2 } from "node:os";
+import { join as join3 } from "node:path";
 class OutlookError2 extends Error {
 }
 var ax2 = new AxClient, callContext2 = new AsyncLocalStorage2;
@@ -30255,6 +30313,14 @@ function checkCancelled2() {
 }
 ax2.guard = checkCancelled2;
 var queue2 = Promise.resolve();
+var LOCK2 = join3(tmpdir2(), `axlook-ui-${process.getuid?.() ?? "user"}.lock`);
+function releaseUiLock2() {
+  try {
+    if (readFileSync2(LOCK2, "utf8") === String(process.pid))
+      unlinkSync2(LOCK2);
+  } catch {}
+}
+process.on("exit", releaseUiLock2);
 var CALL_TIMEOUT_MS2 = (Number(process.env.AXLOOK_CALL_TIMEOUT) || 90) * 1000;
 var sleep2 = (ms) => new Promise((r) => setTimeout(r, ms));
 function openApp(args) {
@@ -30527,7 +30593,7 @@ async function assertNoInlineDraft() {
   if (draft && !await isOurDraft(draft))
     throw new OutlookError2(`A draft ("${draft.value || "no subject"}") is open in Outlook's main window. Finish, close or pop it out first; the server will not navigate away from a message you are writing.`);
 }
-var OPENED_DRAFT = join2(tmpdir(), `axlook-opened-draft-${process.getuid?.() ?? "user"}.json`);
+var OPENED_DRAFT = join4(tmpdir3(), `axlook-opened-draft-${process.getuid?.() ?? "user"}.json`);
 async function draftBody() {
   let area = await bodyEditor("main", 1500).catch(() => null);
   return area ? (await ax2.text(area.h)).text : "";
@@ -30550,7 +30616,7 @@ async function noteOpenedDraft() {
 async function isOurDraft(draft) {
   let key;
   try {
-    key = JSON.parse(readFileSync(OPENED_DRAFT, "utf8")).key;
+    key = JSON.parse(readFileSync3(OPENED_DRAFT, "utf8")).key;
   } catch {
     return !1;
   }
@@ -31057,7 +31123,7 @@ async function readMessage(ref, opts = {}) {
     result.unreadRestored = await restoreUnread(row).catch(() => !1);
   return result;
 }
-var DOWNLOADS = join2(homedir(), "Downloads");
+var DOWNLOADS = join4(homedir(), "Downloads");
 async function waitForStableFile(path, timeoutMs) {
   let lastSize = -1;
   return !!await until(async () => {
@@ -31076,7 +31142,7 @@ async function cancelSheet(match) {
     await ax2.press(cancel.h).catch(() => {});
 }
 async function exportEml(ref, outPath) {
-  let { row } = await openMessage(ref), token = `axlook-${process.pid}-${Date.now().toString(36)}`, saved = join2(DOWNLOADS, `${token}.eml`);
+  let { row } = await openMessage(ref), token = `axlook-${process.pid}-${Date.now().toString(36)}`, saved = join4(DOWNLOADS, `${token}.eml`);
   if (await withFocus(async () => {
     try {
       await pressMenu(["File", "Save As..."], { timeoutMs: 30000, why: "Outlook may still be downloading the message from the server. Retry in a moment." });
@@ -31103,8 +31169,8 @@ async function exportEml(ref, outPath) {
     await restoreUnread(row).catch(() => {});
   if (!await waitForStableFile(saved, 60000))
     throw new OutlookError2("Outlook did not write the .eml file (timed out after 60 s).");
-  let target = outPath ?? join2(tmpdir(), "axlook", `${token}.eml`);
-  if (mkdirSync(join2(target, ".."), { recursive: !0 }), existsSync2(target))
+  let target = outPath ?? join4(tmpdir3(), "axlook", `${token}.eml`);
+  if (mkdirSync(join4(target, ".."), { recursive: !0 }), existsSync2(target))
     throw new OutlookError2(`Refusing to overwrite existing file ${target}.`);
   return renameSync(saved, target), target;
 }
@@ -31195,9 +31261,9 @@ async function deleteMessage(ref) {
 
 // src/outlook/mail.ts
 import { createHash as createHash2 } from "node:crypto";
-import { existsSync as existsSync3, mkdirSync as mkdirSync2, readFileSync as readFileSync2, renameSync as renameSync2, statSync as statSync2, writeFileSync as writeFileSync2 } from "node:fs";
-import { homedir as homedir2, tmpdir as tmpdir2 } from "node:os";
-import { join as join3 } from "node:path";
+import { existsSync as existsSync3, mkdirSync as mkdirSync2, readFileSync as readFileSync4, renameSync as renameSync2, statSync as statSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { homedir as homedir2, tmpdir as tmpdir4 } from "node:os";
+import { join as join5 } from "node:path";
 async function folderOutline2() {
   return await switchModule("Mail"), need("main", { role: "AXOutline" }, "the folder sidebar", { depth: 4 });
 }
@@ -31275,7 +31341,7 @@ async function assertNoInlineDraft2() {
   if (draft && !await isOurDraft2(draft))
     throw new OutlookError2(`A draft ("${draft.value || "no subject"}") is open in Outlook's main window. Finish, close or pop it out first; the server will not navigate away from a message you are writing.`);
 }
-var OPENED_DRAFT2 = join3(tmpdir2(), `axlook-opened-draft-${process.getuid?.() ?? "user"}.json`);
+var OPENED_DRAFT2 = join5(tmpdir4(), `axlook-opened-draft-${process.getuid?.() ?? "user"}.json`);
 async function draftBody2() {
   let area = await bodyEditor("main", 1500).catch(() => null);
   return area ? (await ax2.text(area.h)).text : "";
@@ -31298,7 +31364,7 @@ async function noteOpenedDraft2() {
 async function isOurDraft2(draft) {
   let key;
   try {
-    key = JSON.parse(readFileSync2(OPENED_DRAFT2, "utf8")).key;
+    key = JSON.parse(readFileSync4(OPENED_DRAFT2, "utf8")).key;
   } catch {
     return !1;
   }
@@ -31664,7 +31730,7 @@ async function restoreUnread2(row) {
     await ax2.menu(["Message", "Toggle Unread"]);
   }), !!await until(async () => await rowUnread2(row) === !0 ? !0 : null, 3000, 250);
 }
-var DOWNLOADS2 = join3(homedir2(), "Downloads");
+var DOWNLOADS2 = join5(homedir2(), "Downloads");
 
 // node_modules/postal-mime/dist/esm/decode-strings.js
 var textEncoder = /* @__PURE__ */ new TextEncoder, isWsp = (c) => c === 32 || c === 9;
@@ -37155,13 +37221,13 @@ function htmlToText3(html) {
 }
 
 // src/conventions.ts
-import { copyFileSync, existsSync as existsSync4, mkdirSync as mkdirSync3, readFileSync as readFileSync3, renameSync as renameSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { copyFileSync, existsSync as existsSync4, mkdirSync as mkdirSync3, readFileSync as readFileSync5, renameSync as renameSync3, writeFileSync as writeFileSync3 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
-import { join as join4 } from "node:path";
+import { join as join6 } from "node:path";
 var DEFAULT_KEYS = ["default_calendar", "default_from"], MAX_CHARS = 8000;
 function conventionsPath(env = process.env) {
-  let dir = env.AXLOOK_CONFIG_DIR || join4(env.XDG_CONFIG_HOME || join4(homedir3(), ".config"), "axlook");
-  return join4(dir, "conventions.md");
+  let dir = env.AXLOOK_CONFIG_DIR || join6(env.XDG_CONFIG_HOME || join6(homedir3(), ".config"), "axlook");
+  return join6(dir, "conventions.md");
 }
 function parseConventions(raw) {
   let text = raw.replace(/^﻿/, "").replace(/\r\n/g, `
@@ -37185,7 +37251,7 @@ function parseConventions(raw) {
 function readConventions(path = conventionsPath()) {
   if (!existsSync4(path))
     return { path, exists: !1, defaults: {}, settings: {}, body: "", raw: "" };
-  let raw = readFileSync3(path, "utf8"), { defaults: all, body } = parseConventions(raw), defaults = {}, settings = {};
+  let raw = readFileSync5(path, "utf8"), { defaults: all, body } = parseConventions(raw), defaults = {}, settings = {};
   for (let [k, v] of Object.entries(all))
     if (DEFAULT_KEYS.includes(k))
       defaults[k] = v;
@@ -37199,8 +37265,8 @@ function writeConventions(content, path = conventionsPath()) {
 `;
   if (text.length > MAX_CHARS)
     throw Error(`Conventions are limited to ${MAX_CHARS} characters (got ${text.length}); keep them to the rules that matter.`);
-  if (mkdirSync3(join4(path, ".."), { recursive: !0 }), existsSync4(path)) {
-    if (readFileSync3(path, "utf8") === text)
+  if (mkdirSync3(join6(path, ".."), { recursive: !0 }), existsSync4(path)) {
+    if (readFileSync5(path, "utf8") === text)
       return { ...readConventions(path), changed: !1 };
     copyFileSync(path, `${path}.bak`);
   }
@@ -37222,7 +37288,7 @@ function conventionsInstructions(c) {
 // package.json
 var package_default = {
   name: "axlook-mcp",
-  version: "0.3.2",
+  version: "0.3.3",
   description: "MCP server for New Outlook for Mac: mail, drafts and calendars through macOS Accessibility, no Graph API or tokens",
   keywords: [
     "mcp",
@@ -37334,7 +37400,7 @@ var server = {
   registerTool(name, config2, handler) {
     mcp.registerTool(name, config2, handler.named?.(name) ?? handler);
   }
-}, ref = exports_external.string().describe("Message ref returned by outlook_list_messages / outlook_search_messages"), eventRef = exports_external.string().describe("Event ref returned by outlook_list_events"), RO = { readOnlyHint: !0, openWorldHint: !1 }, WRITE = { readOnlyHint: !1, destructiveHint: !1, openWorldHint: !1 }, expandHome = (p) => p.startsWith("~") ? join5(homedir4(), p.slice(1)) : p, attachments = exports_external.array(exports_external.string()).optional().describe("Local files to add (absolute or ~/ paths). Images are embedded in the body after your text; other files are attached.");
+}, ref = exports_external.string().describe("Message ref returned by outlook_list_messages / outlook_search_messages"), eventRef = exports_external.string().describe("Event ref returned by outlook_list_events"), RO = { readOnlyHint: !0, openWorldHint: !1 }, WRITE = { readOnlyHint: !1, destructiveHint: !1, openWorldHint: !1 }, expandHome = (p) => p.startsWith("~") ? join7(homedir4(), p.slice(1)) : p, attachments = exports_external.array(exports_external.string()).optional().describe("Local files to add (absolute or ~/ paths). Images are embedded in the body after your text; other files are attached.");
 function localFiles(paths) {
   if (!paths?.length)
     return;
