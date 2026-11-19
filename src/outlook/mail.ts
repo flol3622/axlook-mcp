@@ -317,7 +317,7 @@ async function listSignature(): Promise<string | null> {
   const t = await ax.findOne("main", { role: "AXTable", desc: "Message List" }, { depth: 8 });
   if (!t) return null;
   const cells = await ax.find(t.h, { role: "AXCell" }, { depth: 2, limit: 6 });
-  const rows = (await ax.call<AxNode[]>("elements", { h: t.h, attr: "AXRows" })).length;
+  const rows = await rowCount(t);
   return cells.map((c) => c.desc ?? "").join("|") + `#${rows}`;
 }
 
@@ -350,9 +350,16 @@ export function expandedConversation(desc: string): number | null {
   return m ? Number(m[1]) : null;
 }
 
-async function readRows(table: AxNode): Promise<RowInfo[]> {
-  // AXRows lists every loaded row; AXChildren only those currently built around the viewport.
-  const rowsEl = await ax.call<AxNode[]>("elements", { h: table.h, attr: "AXRows", subtree: 1 });
+/** Rows a lookup loads at most. Every loaded row slows down each later read of the list. */
+const MAX_ROWS = 600;
+
+/**
+ * The first `limit` rows of the list. AXRows lists every loaded row; AXChildren only those currently built
+ * around the viewport. Outlook keeps every row it ever loaded in a folder (even after switching folders), and
+ * reading thousands of them takes longer than a helper command may: read only as many as needed.
+ */
+async function readRows(table: AxNode, limit = MAX_ROWS + 200): Promise<RowInfo[]> {
+  const rowsEl = await ax.call<AxNode[]>("elements", { h: table.h, attr: "AXRows", subtree: 1, limit }, 60_000);
   const rows: RowInfo[] = [];
   let group: string | null = null;
   let thread: { id: number; count: number; pos: number } | null = null;
@@ -377,9 +384,11 @@ async function readRows(table: AxNode): Promise<RowInfo[]> {
   return rows;
 }
 
+const rowCount = (table: AxNode) => ax.call<number>("count", { h: table.h, attr: "AXRows" });
+
 async function cellCount(): Promise<number> {
   const t = await ax.findOne("main", { role: "AXTable", desc: "Message List" }, { depth: 8 });
-  return t ? (await ax.call<AxNode[]>("elements", { h: t.h, attr: "AXRows" })).length : 0;
+  return t ? rowCount(t) : 0;
 }
 
 async function scrollBar(table: AxNode): Promise<AxNode | null> {
@@ -390,7 +399,8 @@ async function scrollBar(table: AxNode): Promise<AxNode | null> {
 /** Load rows until at least `want` are available (scrolling to the end triggers lazy loading). */
 async function loadRows(want: number): Promise<RowInfo[]> {
   let table = await messageTable();
-  let rows = await readRows(table);
+  const limit = want + 100; // group headers and conversation headers are rows too
+  let rows = await readRows(table, limit);
   const deadline = Date.now() + 90_000;
   for (let pass = 0; rows.length < want && pass < 40 && Date.now() < deadline; pass++) {
     const bar = await scrollBar(table);
@@ -399,7 +409,7 @@ async function loadRows(want: number): Promise<RowInfo[]> {
     await ax.set(bar.h, "AXValue", 1, "number");
     const grew = await until(async () => ((await cellCount()) > before ? true : null), 3500, 300);
     table = await messageTable();
-    const next = await readRows(table);
+    const next = await readRows(table, limit);
     if (!grew || next.length <= rows.length) {
       rows = next.length > rows.length ? next : rows;
       break; // nothing more to load
@@ -523,7 +533,9 @@ async function runSearch(query: string, enough = Infinity) {
   const ok = await until(async () => ((await ax.get("main")).title ?? "").startsWith("Searching"), 6000);
   if (!ok) throw new OutlookError("Outlook did not start the search.");
   // The folder's own messages stay listed until the first results (or an empty list) replace them.
-  await until(async () => (await listSignature()) !== folderList, 12_000, 250);
+  if (!(await until(async () => (await listSignature()) !== folderList, 12_000, 250))) {
+    throw new SearchLeft("Outlook kept showing the folder instead of search results; search again.");
+  }
   if (!(await until(async () => (await cellCount()) > 0, 8000, 300))) return;
   let last = 0;
   let since = Date.now();
@@ -537,7 +549,16 @@ async function runSearch(query: string, enough = Infinity) {
     return n >= enough + 2 || Date.now() - since > 2500;
   }, 20_000, 300);
   await waitListSettled();
+  await assertSearching();
 }
+
+const isSearching = async () => ((await ax.get("main")).title ?? "").startsWith("Searching");
+
+/** The folder's own list must never be returned as search results. */
+async function assertSearching() {
+  if (!(await isSearching())) throw new SearchLeft("Outlook left its search results view before they could be read; search again.");
+}
+class SearchLeft extends OutlookError {}
 
 async function defaultScope(): Promise<string> {
   const rows = await readFolderRows();
@@ -553,9 +574,19 @@ async function defaultScope(): Promise<string> {
  */
 export async function searchMessages(opts: { query: string; folder?: string; limit?: number }) {
   const scope = opts.folder ?? (await defaultScope());
-  const folder = await openFolder(scope);
-  await runSearch(opts.query, opts.limit ?? 25);
-  const rows = await loadRows(opts.limit ?? 25);
+  let folder: Folder;
+  let rows: RowInfo[];
+  for (let attempt = 0; ; attempt++) {
+    folder = await openFolder(scope);
+    try {
+      await runSearch(opts.query, opts.limit ?? 25);
+      rows = await loadRows(opts.limit ?? 25);
+      await assertSearching();
+      break;
+    } catch (e) {
+      if (!(e instanceof SearchLeft) || attempt >= 1) throw e;
+    }
+  }
   const title = (await ax.get("main")).title ?? "";
   return {
     query: opts.query,
@@ -639,9 +670,9 @@ async function locate(ref: string): Promise<Located> {
     rows = await loadRows(want);
     const hit = pick(rows);
     if (hit) return hit;
-    // Past a thousand rows the ref is more likely stale than far down: give up rather than scroll on.
-    if (rows.length >= want && want < 1000) {
-      want *= 3;
+    // Past MAX_ROWS the ref is more likely stale than far down: give up rather than scroll on.
+    if (rows.length >= want && want < MAX_ROWS) {
+      want = Math.min(want * 3, MAX_ROWS);
       continue;
     }
     if (rows.length >= want) break;

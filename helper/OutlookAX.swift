@@ -481,10 +481,27 @@ func handle(_ req: [String: Any]) throws -> Any {
     // Elements held in an array attribute (e.g. a table's AXRows, which includes rows not built as children yet).
     let e = try resolve(try arg(req, "h"))
     let name: String = try arg(req, "attr")
-    let els = (attr(e, name) as? [AXUIElement]) ?? []
     let sub = (req["subtree"] as? Int) ?? 0
     let limit = (req["limit"] as? Int) ?? 5000
-    return els.prefix(limit).map { tree($0, depth: 0, maxDepth: sub, maxChildren: 50, withFrame: false) }
+    // Copy only the first `limit` elements: a table can hold thousands of loaded rows.
+    var values: CFArray?
+    let els: [AXUIElement]
+    if AXUIElementCopyAttributeValues(e, name as CFString, 0, limit, &values) == .success, let v = values as? [AXUIElement] {
+      els = v
+    } else {
+      els = Array(((attr(e, name) as? [AXUIElement]) ?? []).prefix(limit))
+    }
+    return els.map { tree($0, depth: 0, maxDepth: sub, maxChildren: 50, withFrame: false) }
+
+  case "count":
+    // Number of elements in an array attribute, without copying them.
+    let e = try resolve(try arg(req, "h"))
+    let name: String = try arg(req, "attr")
+    var n: CFIndex = 0
+    if AXUIElementGetAttributeValueCount(e, name as CFString, &n) != .success {
+      n = ((attr(e, name) as? [AXUIElement]) ?? []).count
+    }
+    return n
 
   case "parent":
     let e = try resolve(try arg(req, "h"))

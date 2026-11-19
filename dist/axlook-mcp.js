@@ -30609,7 +30609,7 @@ async function listSignature() {
   let t = await ax2.findOne("main", { role: "AXTable", desc: "Message List" }, { depth: 8 });
   if (!t)
     return null;
-  let cells = await ax2.find(t.h, { role: "AXCell" }, { depth: 2, limit: 6 }), rows = (await ax2.call("elements", { h: t.h, attr: "AXRows" })).length;
+  let cells = await ax2.find(t.h, { role: "AXCell" }, { depth: 2, limit: 6 }), rows = await rowCount(t);
   return cells.map((c) => c.desc ?? "").join("|") + `#${rows}`;
 }
 async function waitListSettled(minRows = 0) {
@@ -30632,8 +30632,9 @@ function expandedConversation(desc) {
   let m = desc.match(/^\s*Expanded, Conversation, (\d+) messages?,/);
   return m ? Number(m[1]) : null;
 }
-async function readRows(table) {
-  let rowsEl = await ax2.call("elements", { h: table.h, attr: "AXRows", subtree: 1 }), rows = [], group = null, thread = null;
+var MAX_ROWS = 600;
+async function readRows(table, limit = MAX_ROWS + 200) {
+  let rowsEl = await ax2.call("elements", { h: table.h, attr: "AXRows", subtree: 1, limit }, 60000), rows = [], group = null, thread = null;
   return rowsEl.forEach((r, i) => {
     let desc = r.children?.find((c) => c.role === "AXCell")?.desc ?? "";
     if (isGroupHeader(desc)) {
@@ -30654,16 +30655,17 @@ async function readRows(table) {
       rows.push({ ...p, group, h: r.h });
   }), rows;
 }
+var rowCount = (table) => ax2.call("count", { h: table.h, attr: "AXRows" });
 async function cellCount() {
   let t = await ax2.findOne("main", { role: "AXTable", desc: "Message List" }, { depth: 8 });
-  return t ? (await ax2.call("elements", { h: t.h, attr: "AXRows" })).length : 0;
+  return t ? rowCount(t) : 0;
 }
 async function scrollBar(table) {
   let area = await ax2.call("parent", { h: table.h });
   return ax2.findOne(area.h, { role: "AXScrollBar" }, { depth: 1 });
 }
 async function loadRows(want) {
-  let table = await messageTable(), rows = await readRows(table), deadline = Date.now() + 90000;
+  let table = await messageTable(), limit = want + 100, rows = await readRows(table, limit), deadline = Date.now() + 90000;
   for (let pass = 0;rows.length < want && pass < 40 && Date.now() < deadline; pass++) {
     let bar2 = await scrollBar(table);
     if (!bar2)
@@ -30672,7 +30674,7 @@ async function loadRows(want) {
     await ax2.set(bar2.h, "AXValue", 1, "number");
     let grew = await until(async () => await cellCount() > before ? !0 : null, 3500, 300);
     table = await messageTable();
-    let next = await readRows(table);
+    let next = await readRows(table, limit);
     if (!grew || next.length <= rows.length) {
       rows = next.length > rows.length ? next : rows;
       break;
@@ -30742,7 +30744,9 @@ async function runSearch(query, enough = 1 / 0) {
   let field = await searchField(), folderList = await listSignature();
   if (await ax2.set(field.h, "AXValue", query), await ax2.press(field.h, "AXConfirm"), !await until(async () => ((await ax2.get("main")).title ?? "").startsWith("Searching"), 6000))
     throw new OutlookError2("Outlook did not start the search.");
-  if (await until(async () => await listSignature() !== folderList, 12000, 250), !await until(async () => await cellCount() > 0, 8000, 300))
+  if (!await until(async () => await listSignature() !== folderList, 12000, 250))
+    throw new SearchLeft("Outlook kept showing the folder instead of search results; search again.");
+  if (!await until(async () => await cellCount() > 0, 8000, 300))
     return;
   let last = 0, since = Date.now();
   await until(async () => {
@@ -30750,7 +30754,15 @@ async function runSearch(query, enough = 1 / 0) {
     if (n !== last)
       last = n, since = Date.now();
     return n >= enough + 2 || Date.now() - since > 2500;
-  }, 20000, 300), await waitListSettled();
+  }, 20000, 300), await waitListSettled(), await assertSearching();
+}
+var isSearching = async () => ((await ax2.get("main")).title ?? "").startsWith("Searching");
+async function assertSearching() {
+  if (!await isSearching())
+    throw new SearchLeft("Outlook left its search results view before they could be read; search again.");
+}
+
+class SearchLeft extends OutlookError2 {
 }
 async function defaultScope() {
   let rows = await readFolderRows();
@@ -30762,9 +30774,18 @@ async function defaultScope() {
   return inbox.path;
 }
 async function searchMessages(opts) {
-  let scope = opts.folder ?? await defaultScope(), folder = await openFolder(scope);
-  await runSearch(opts.query, opts.limit ?? 25);
-  let rows = await loadRows(opts.limit ?? 25), title = (await ax2.get("main")).title ?? "";
+  let scope = opts.folder ?? await defaultScope(), folder, rows;
+  for (let attempt = 0;; attempt++) {
+    folder = await openFolder(scope);
+    try {
+      await runSearch(opts.query, opts.limit ?? 25), rows = await loadRows(opts.limit ?? 25), await assertSearching();
+      break;
+    } catch (e) {
+      if (!(e instanceof SearchLeft) || attempt >= 1)
+        throw e;
+    }
+  }
+  let title = (await ax2.get("main")).title ?? "";
   return {
     query: opts.query,
     scope: title.replace(/^Searching\s*/, "").replace(/^"|"$/g, "") || folder.path,
@@ -30816,8 +30837,8 @@ async function locate(ref) {
     let hit = pick2(rows);
     if (hit)
       return hit;
-    if (rows.length >= want && want < 1000) {
-      want *= 3;
+    if (rows.length >= want && want < MAX_ROWS) {
+      want = Math.min(want * 3, MAX_ROWS);
       continue;
     }
     if (rows.length >= want)
@@ -31336,7 +31357,7 @@ async function listSignature2() {
   let t = await ax2.findOne("main", { role: "AXTable", desc: "Message List" }, { depth: 8 });
   if (!t)
     return null;
-  let cells = await ax2.find(t.h, { role: "AXCell" }, { depth: 2, limit: 6 }), rows = (await ax2.call("elements", { h: t.h, attr: "AXRows" })).length;
+  let cells = await ax2.find(t.h, { role: "AXCell" }, { depth: 2, limit: 6 }), rows = await rowCount2(t);
   return cells.map((c) => c.desc ?? "").join("|") + `#${rows}`;
 }
 async function waitListSettled2(minRows = 0) {
@@ -31359,8 +31380,9 @@ function expandedConversation2(desc) {
   let m = desc.match(/^\s*Expanded, Conversation, (\d+) messages?,/);
   return m ? Number(m[1]) : null;
 }
-async function readRows2(table) {
-  let rowsEl = await ax2.call("elements", { h: table.h, attr: "AXRows", subtree: 1 }), rows = [], group = null, thread = null;
+var MAX_ROWS2 = 600;
+async function readRows2(table, limit = MAX_ROWS2 + 200) {
+  let rowsEl = await ax2.call("elements", { h: table.h, attr: "AXRows", subtree: 1, limit }, 60000), rows = [], group = null, thread = null;
   return rowsEl.forEach((r, i) => {
     let desc = r.children?.find((c) => c.role === "AXCell")?.desc ?? "";
     if (isGroupHeader2(desc)) {
@@ -31381,16 +31403,17 @@ async function readRows2(table) {
       rows.push({ ...p, group, h: r.h });
   }), rows;
 }
+var rowCount2 = (table) => ax2.call("count", { h: table.h, attr: "AXRows" });
 async function cellCount2() {
   let t = await ax2.findOne("main", { role: "AXTable", desc: "Message List" }, { depth: 8 });
-  return t ? (await ax2.call("elements", { h: t.h, attr: "AXRows" })).length : 0;
+  return t ? rowCount2(t) : 0;
 }
 async function scrollBar2(table) {
   let area = await ax2.call("parent", { h: table.h });
   return ax2.findOne(area.h, { role: "AXScrollBar" }, { depth: 1 });
 }
 async function loadRows2(want) {
-  let table = await messageTable2(), rows = await readRows2(table), deadline = Date.now() + 90000;
+  let table = await messageTable2(), limit = want + 100, rows = await readRows2(table, limit), deadline = Date.now() + 90000;
   for (let pass = 0;rows.length < want && pass < 40 && Date.now() < deadline; pass++) {
     let bar2 = await scrollBar2(table);
     if (!bar2)
@@ -31399,7 +31422,7 @@ async function loadRows2(want) {
     await ax2.set(bar2.h, "AXValue", 1, "number");
     let grew = await until(async () => await cellCount2() > before ? !0 : null, 3500, 300);
     table = await messageTable2();
-    let next = await readRows2(table);
+    let next = await readRows2(table, limit);
     if (!grew || next.length <= rows.length) {
       rows = next.length > rows.length ? next : rows;
       break;
@@ -31463,7 +31486,9 @@ async function runSearch2(query, enough = 1 / 0) {
   let field = await searchField2(), folderList = await listSignature2();
   if (await ax2.set(field.h, "AXValue", query), await ax2.press(field.h, "AXConfirm"), !await until(async () => ((await ax2.get("main")).title ?? "").startsWith("Searching"), 6000))
     throw new OutlookError2("Outlook did not start the search.");
-  if (await until(async () => await listSignature2() !== folderList, 12000, 250), !await until(async () => await cellCount2() > 0, 8000, 300))
+  if (!await until(async () => await listSignature2() !== folderList, 12000, 250))
+    throw new SearchLeft2("Outlook kept showing the folder instead of search results; search again.");
+  if (!await until(async () => await cellCount2() > 0, 8000, 300))
     return;
   let last = 0, since = Date.now();
   await until(async () => {
@@ -31471,7 +31496,15 @@ async function runSearch2(query, enough = 1 / 0) {
     if (n !== last)
       last = n, since = Date.now();
     return n >= enough + 2 || Date.now() - since > 2500;
-  }, 20000, 300), await waitListSettled2();
+  }, 20000, 300), await waitListSettled2(), await assertSearching2();
+}
+var isSearching2 = async () => ((await ax2.get("main")).title ?? "").startsWith("Searching");
+async function assertSearching2() {
+  if (!await isSearching2())
+    throw new SearchLeft2("Outlook left its search results view before they could be read; search again.");
+}
+
+class SearchLeft2 extends OutlookError2 {
 }
 async function rowDesc2(h) {
   return (await ax2.tree(h, 1).catch(() => null))?.children?.find((c) => c.role === "AXCell")?.desc ?? null;
@@ -31518,8 +31551,8 @@ async function locate2(ref) {
     let hit = pick2(rows);
     if (hit)
       return hit;
-    if (rows.length >= want && want < 1000) {
-      want *= 3;
+    if (rows.length >= want && want < MAX_ROWS2) {
+      want = Math.min(want * 3, MAX_ROWS2);
       continue;
     }
     if (rows.length >= want)
@@ -37189,7 +37222,7 @@ function conventionsInstructions(c) {
 // package.json
 var package_default = {
   name: "axlook-mcp",
-  version: "0.3.1",
+  version: "0.3.2",
   description: "MCP server for New Outlook for Mac: mail, drafts and calendars through macOS Accessibility, no Graph API or tokens",
   keywords: [
     "mcp",
