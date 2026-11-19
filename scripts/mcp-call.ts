@@ -2,7 +2,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 const client = new Client({ name: "manual-test", version: "0" });
-await client.connect(new StdioClientTransport({ command: "bun", args: ["run", new URL("../src/server.ts", import.meta.url).pathname] }));
+await client.connect(new StdioClientTransport({ command: "bun", args: ["run", new URL("../src/server.ts", import.meta.url).pathname], env: process.env as Record<string, string> }));
 const argv = process.argv.slice(2);
 if (!argv.length) {
   const { tools } = await client.listTools();

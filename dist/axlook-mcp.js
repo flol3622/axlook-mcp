@@ -5867,7 +5867,7 @@ var require_dist = __commonJS((exports, module) => {
 // src/server.ts
 import { homedir as homedir4 } from "os";
 import { join as join5, resolve as resolve3 } from "path";
-import { rmSync, statSync as statSync2 } from "fs";
+import { rmSync, statSync as statSync3 } from "fs";
 
 // node_modules/zod/v3/helpers/util.js
 var util;
@@ -30038,6 +30038,9 @@ class StdioServerTransport {
     });
   }
 }
+// src/outlook/session.ts
+import { AsyncLocalStorage } from "node:async_hooks";
+
 // src/ax.ts
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -30053,6 +30056,7 @@ class AxClient {
   pending = /* @__PURE__ */ new Map;
   nextId = 1;
   buffer = "";
+  guard = null;
   start() {
     if (!existsSync(HELPER_PATH))
       throw Error(`Accessibility helper not found at ${HELPER_PATH}. Run: bun run build:helper`);
@@ -30095,6 +30099,11 @@ class AxClient {
     }
   }
   call(cmd, args = {}, timeoutMs = 30000) {
+    try {
+      this.guard?.();
+    } catch (e) {
+      return Promise.reject(e);
+    }
     if (!this.proc)
       this.start();
     let proc = this.proc, id = this.nextId++;
@@ -30172,13 +30181,54 @@ var KEY = { RETURN: 36, TAB: 48, DELETE: 51, ESCAPE: 53, FORWARD_DELETE: 117, HO
 // src/outlook/session.ts
 class OutlookError extends Error {
 }
-var ax = new AxClient, queue = Promise.resolve();
-function exclusive(fn) {
+var ax = new AxClient, callContext = new AsyncLocalStorage;
+function checkCancelled() {
+  let c = callContext.getStore();
+  if (c?.cancelled)
+    throw new OutlookError(`${c.label} was cancelled after its deadline.`);
+}
+ax.guard = checkCancelled;
+var queue = Promise.resolve(), queued = 0, current = null;
+function busy() {
+  return current ? { tool: current.label, runningForSeconds: Math.round((Date.now() - current.since) / 1000), queued } : null;
+}
+var CALL_TIMEOUT_MS = (Number(process.env.AXLOOK_CALL_TIMEOUT) || 90) * 1000;
+function exclusive(fn, opts = {}) {
+  let label = opts.label ?? "call", timeoutMs = opts.timeoutMs ?? CALL_TIMEOUT_MS;
+  queued++;
   let run = queue.then(async () => {
-    return await ax.call("release").catch(() => {}), fn();
+    queued--;
+    let ctx = { label, cancelled: !1 };
+    current = { label, since: Date.now() };
+    let work = callContext.run(ctx, async () => {
+      return await ax.call("release").catch(() => {}), fn();
+    }), timer, timedOut = new OutlookError(`${label} timed out after ${Math.round(timeoutMs / 1000)} s; Outlook may be busy or showing something unexpected. Later calls start from a fresh state.`), deadline = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(timedOut), timeoutMs);
+    });
+    try {
+      return await Promise.race([work, deadline]);
+    } catch (e) {
+      if (e === timedOut)
+        ctx.cancelled = !0, ax.close(), await settled(work, 15000), await resetUi().catch(() => {});
+      throw e;
+    } finally {
+      clearTimeout(timer), current = null;
+    }
   });
   return queue = run.catch(() => {}), run;
 }
+function settled(p, ms) {
+  return Promise.race([p.then(() => !0, () => !0), sleep(ms).then(() => !1)]);
+}
+async function resetUi() {
+  let sheet = await ax.findOne("main", { role: "AXSheet" }, { depth: 1 }), cancel = sheet ? await ax.findOne(sheet.h, { role: "AXButton", titleRegex: "^Cancel$" }, { depth: 3 }) : null;
+  if (cancel)
+    await ax.press(cancel.h).catch(() => {});
+  let menu = await ax.findOne("app", { role: "AXMenu" }, { depth: 3 }).catch(() => null);
+  if (menu)
+    await ax.call("press", { h: menu.h, action: "AXCancel" }).catch(() => {});
+}
+var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function status() {
   return ax.call("ping");
 }
@@ -30187,28 +30237,39 @@ async function windows() {
 }
 
 // src/outlook/mail.ts
-import { existsSync as existsSync2, mkdirSync, renameSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync as existsSync2, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join as join2 } from "node:path";
 
 // src/outlook/session.ts
+import { AsyncLocalStorage as AsyncLocalStorage2 } from "node:async_hooks";
 import { execFile } from "node:child_process";
 class OutlookError2 extends Error {
 }
-var ax2 = new AxClient, queue2 = Promise.resolve();
-var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+var ax2 = new AxClient, callContext2 = new AsyncLocalStorage2;
+function checkCancelled2() {
+  let c = callContext2.getStore();
+  if (c?.cancelled)
+    throw new OutlookError2(`${c.label} was cancelled after its deadline.`);
+}
+ax2.guard = checkCancelled2;
+var queue2 = Promise.resolve();
+var CALL_TIMEOUT_MS2 = (Number(process.env.AXLOOK_CALL_TIMEOUT) || 90) * 1000;
+var sleep2 = (ms) => new Promise((r) => setTimeout(r, ms));
 function openApp(args) {
   return new Promise((resolve2, reject) => execFile("/usr/bin/open", args, (err) => err ? reject(err) : resolve2()));
 }
 async function until(fn, timeoutMs = 5000, everyMs = 120) {
   let deadline = Date.now() + timeoutMs;
   while (!0) {
+    checkCancelled2();
     let v = await fn().catch(() => null);
     if (v)
       return v;
     if (Date.now() >= deadline)
       return null;
-    await sleep(everyMs);
+    await sleep2(everyMs);
   }
 }
 async function status2() {
@@ -30261,27 +30322,34 @@ async function withFocus(fn) {
     focusDepth--;
     let prev = res.previous;
     if (prev?.pid && prev.bundleId !== "com.microsoft.Outlook" && process.env.AXLOOK_KEEP_FOCUS !== "1")
-      await ax2.call("restore", { pid: prev.pid }).catch(() => {});
+      await callContext2.exit(() => ax2.call("restore", { pid: prev.pid })).catch(() => {});
   }
 }
 async function bringToFront() {
   if (!(await ax2.call("activate", { settleMs: 150 })).active)
     throw new OutlookError2("Could not bring Outlook to the front.");
 }
-async function switchModule(mod) {
-  let w = await mainWindow(), isThere = async () => {
-    if (mod === "Calendar")
-      return ax2.findOne("main", { id: "cal_grid_header_view_switcher" }, { depth: 2 });
-    return ax2.findOne("main", { role: "AXTable", desc: "Message List" }, { depth: 8 });
-  };
-  if (await isThere())
-    return w;
+async function inModule(mod) {
+  if (mod === "Calendar")
+    return !!await ax2.findOne("main", { idRegex: "^cal_grid_header_(view_switcher|today|date_range)$" }, { depth: 5 });
+  return !!await ax2.findOne("main", { role: "AXTable", desc: "Message List" }, { depth: 8 });
+}
+async function pressModuleButton(mod) {
   let btn = await ax2.findOne("main", { role: "AXButton", help: mod }, { depth: 3 });
   if (!btn)
     throw new OutlookError2(`Could not find the ${mod} button in Outlook's sidebar.`);
-  if (await ax2.press(btn.h), !await until(isThere, 6000))
-    throw new OutlookError2(`Outlook did not switch to ${mod}.`);
-  return await mainWindow();
+  await ax2.press(btn.h);
+}
+async function switchModule(mod) {
+  let w = await mainWindow();
+  if (await inModule(mod))
+    return w;
+  if (await pressModuleButton(mod), !await until(() => inModule(mod), 6000)) {
+    let other = mod === "Mail" ? "Calendar" : "Mail";
+    if (await pressModuleButton(other), await until(() => inModule(other), 6000), await pressModuleButton(mod), !await until(() => inModule(mod), 8000))
+      throw new OutlookError2(`Outlook did not switch to ${mod}.`);
+  }
+  return mainWindow();
 }
 async function need(h, match, what, opts = {}) {
   if (opts.timeoutMs) {
@@ -30325,7 +30393,7 @@ async function pressMenu(path, opts = {}) {
         throw new OutlookError2(`Outlook kept ${path.join(" > ")} disabled${opts.why ? `: ${opts.why}` : "."}`);
       if (attempt % 3 === 2)
         await bringToFront().catch(() => {});
-      await sleep(400);
+      await sleep2(400);
     }
   return ax2.menu(path);
 }
@@ -30347,14 +30415,14 @@ async function pasteInto(area, text, opts = {}) {
       return await ax2.set(area.h, "AXFocused", !0), (await ax2.get(area.h, { attrs: ["AXFocused"] })).attrs?.AXFocused === !0;
     }, 4000, 300))
       continue;
-    if (await sleep(250), opts.mode === "replace")
+    if (await sleep2(250), opts.mode === "replace")
       await ax2.menu(["Edit", "Select All"]).catch(() => {});
     else
       await ax2.key(KEY.UP, ["cmd"]);
-    if (await sleep(150), await ax2.paste(text, opts.html), !probe)
+    if (await sleep2(150), await ax2.paste(text, opts.html), !probe)
       return;
     if (await until(arrived, 4000, 250)) {
-      await sleep(600);
+      await sleep2(600);
       return;
     }
   }
@@ -30407,7 +30475,7 @@ async function expandAll() {
       let cell = r.children.find((c) => c.role === "AXCell");
       expandedNow.push(`${r.x?.AXDisclosureLevel}|${cell.desc.split(";")[0]}`), await ax2.set(r.h, "AXDisclosing", !0);
     }
-    await sleep(500);
+    await sleep2(500);
   }
   return expandedNow;
 }
@@ -30456,8 +30524,37 @@ async function assertNoInlineDraft() {
   if ((await ax2.call("frontmost")).bundleId !== "com.microsoft.Outlook")
     return;
   let draft = await ax2.findOne("main", { id: "subjectTextField" }, { depth: 10 });
-  if (draft)
+  if (draft && !await isOurDraft(draft))
     throw new OutlookError2(`A draft ("${draft.value || "no subject"}") is open in Outlook's main window. Finish, close or pop it out first; the server will not navigate away from a message you are writing.`);
+}
+var OPENED_DRAFT = join2(tmpdir(), `axlook-opened-draft-${process.getuid?.() ?? "user"}.json`);
+async function draftBody() {
+  let area = await bodyEditor("main", 1500).catch(() => null);
+  return area ? (await ax2.text(area.h)).text : "";
+}
+var draftKey = (subject, body) => createHash("sha256").update(`${subject}\x00${body}`).digest("hex");
+async function noteOpenedDraft() {
+  let draft = await ax2.findOne("main", { id: "subjectTextField" }, { depth: 10 });
+  if (!draft)
+    return;
+  let body = await draftBody();
+  for (let i = 0;i < 6; i++) {
+    await sleep2(400);
+    let next = await draftBody();
+    if (next === body)
+      break;
+    body = next;
+  }
+  writeFileSync(OPENED_DRAFT, JSON.stringify({ key: draftKey(draft.value ?? "", body) }));
+}
+async function isOurDraft(draft) {
+  let key;
+  try {
+    key = JSON.parse(readFileSync(OPENED_DRAFT, "utf8")).key;
+  } catch {
+    return !1;
+  }
+  return key === draftKey(draft.value ?? "", await draftBody());
 }
 async function openFolder(folder) {
   await assertNoInlineDraft(), await exitSearch();
@@ -30617,7 +30714,7 @@ function toSummaries(rows, f, q) {
     let p = previewKey(r.preview), c = isConversation(r) ? r.conversationCount : void 0, key = `${r.subject}\x00${r.sender}\x00${r.date}\x00${previewWords(p)}\x00${c ? 1 : 0}`, k = seen.get(key) ?? 0;
     seen.set(key, k + 1);
     let { h, thread, ...rest } = r;
-    return { ref: encodeRef({ v: 2, f, q, s: r.subject, n: r.sender, d: r.date, p, k, c }), index: i, ...rest };
+    return { ref: encodeRef({ v: 2, f, q, s: r.subject, n: r.sender, d: r.date, p, k, c }), index: i, ...rest, draft: isDraftRow(r, f) };
   });
 }
 async function listMessages(opts) {
@@ -30682,7 +30779,7 @@ async function expandConversation(row) {
   let rows = await readRows(await messageTable()), opened = rows.find((r) => r.thread?.pos === 0 && r.thread.count === row.conversationCount && stripPrefixes(r.subject) === stripPrefixes(row.subject));
   if (opened?.unread)
     await restoreUnread(opened).catch(() => !1);
-  return rows;
+  return await noteOpenedDraft().catch(() => {}), rows;
 }
 function shownMessage(rows, d) {
   let exact = rows.filter((r) => r.thread && r.date === d.d && samePreview(r.preview, d.p));
@@ -30719,10 +30816,12 @@ async function locate(ref) {
     let hit = pick2(rows);
     if (hit)
       return hit;
-    if (rows.length >= want) {
+    if (rows.length >= want && want < 1000) {
       want *= 3;
       continue;
     }
+    if (rows.length >= want)
+      break;
     if (!data.q)
       break;
     let n = await cellCount();
@@ -30806,12 +30905,12 @@ async function headerInfo() {
 }
 async function selectRow(row) {
   await ax2.set(row.h, "AXSelected", !0);
-  let matchesSubject = (s) => sameSubject(s, row.subject);
+  let matchesSubject = (s) => sameSubject(s, row.subject), draft = !1;
   if (!await until(async () => {
     if (!(await ax2.get(row.h).catch(() => null))?.selected)
       return !1;
     let h = await headerInfo();
-    if (h.draftSubject !== null)
+    if (draft = h.draftSubject !== null, draft)
       return matchesSubject(h.draftSubject);
     if (!matchesSubject(h.subject))
       return !1;
@@ -30820,13 +30919,33 @@ async function selectRow(row) {
     return h.from.includes(row.sender.split(",")[0].trim());
   }, 6000, 150))
     throw new OutlookError2(`Outlook did not show message "${row.subject}" in the reading pane.`);
+  if (draft)
+    await noteOpenedDraft().catch(() => {});
 }
-var PRESENCE = /,\s*(Presence \w+|(Available|Away|Busy|Do not disturb|Be right back|Appear offline|Offline|Out of office|In a call|In a meeting|Presenting|Unknown)(?=,|$))/g;
+async function paneContent() {
+  let panes = await ax2.find("main", { role: "AXWebArea", desc: "Reading Pane" }, { depth: 12, limit: 50 });
+  if (!panes.length)
+    return null;
+  let parts = [], links = [];
+  for (let p of panes) {
+    let t = await ax2.text(p.h);
+    parts.push(t.text.trim()), links.push(...t.links);
+  }
+  return { body: parts.filter(Boolean).join(`
+
+— — —
+
+`), links, count: panes.length };
+}
+var lastBody = null, PRESENCE = /,\s*(Presence \w+|(Available|Away|Busy|Do not disturb|Be right back|Appear offline|Offline|Out of office|In a call|In a meeting|Presenting|Unknown)(?=,|$))/g;
 function cleanHeader(v, prefix) {
   return v ? v.replace(prefix, "").replace(PRESENCE, "").trim() : null;
 }
-async function readReadingPane() {
-  let header = await messageHeader();
+async function readReadingPane(content) {
+  let found = await until(async () => await messageHeader() ?? (await ax2.findOne("main", { id: "subjectTextField" }, { depth: 9 }) ? "draft" : null), 4000, 250);
+  if (!found)
+    throw new OutlookError2("Could not find the reading pane in Outlook's UI.");
+  let header = found === "draft" ? null : found;
   if (!header) {
     let subj = await need("main", { id: "subjectTextField" }, "the reading pane", { depth: 9 }), to2 = await ax2.findOne("main", { id: "toTextField" }, { depth: 10 }), area = await bodyEditor("main", 2000).catch(() => null);
     return {
@@ -30837,28 +30956,20 @@ async function readReadingPane() {
       body: area ? (await ax2.text(area.h)).text : "",
       links: [],
       attachments: [],
-      conversationMessages: 1
+      conversationMessages: 1,
+      draft: !0
     };
   }
-  let flat = header.fields, subject = header.subject ?? "", from = flat.find((n) => n.id === "messageHeaderFromContent")?.value, to = flat.find((n) => n.id === "messageHeaderToContent")?.value, rcpt = flat.find((n) => n.id === "messageHeaderRecipientsContent")?.value ?? (to ? `To: ${to}` : void 0), sent = flat.find((n) => n.id === "messageHeaderTimeStampContent")?.value ?? null, when = flat.find((n) => n.id === "messageHeaderWhenContent")?.value, response = flat.find((n) => n.id === "messageHeaderResponseStatusContent")?.value, panes = await ax2.find("main", { role: "AXWebArea", desc: "Reading Pane" }, { depth: 12, limit: 50 }), parts = [], links = [];
-  for (let p of panes) {
-    let t = await ax2.text(p.h);
-    parts.push(t.text.trim()), links.push(...t.links);
-  }
-  let attachments = await readAttachments();
+  let flat = header.fields, subject = header.subject ?? "", from = flat.find((n) => n.id === "messageHeaderFromContent")?.value, to = flat.find((n) => n.id === "messageHeaderToContent")?.value, rcpt = flat.find((n) => n.id === "messageHeaderRecipientsContent")?.value ?? (to ? `To: ${to}` : void 0), sent = flat.find((n) => n.id === "messageHeaderTimeStampContent")?.value ?? null, when = flat.find((n) => n.id === "messageHeaderWhenContent")?.value, response = flat.find((n) => n.id === "messageHeaderResponseStatusContent")?.value, pane = content ?? await paneContent() ?? { body: "", links: [], count: 0 }, attachments = await readAttachments();
   return {
     subject,
     from: cleanHeader(from, /^From:\s*/),
     recipients: cleanHeader(rcpt, /^Recipients:\s*/),
     sent,
-    body: parts.filter(Boolean).join(`
-
-— — —
-
-`),
-    links,
+    body: pane.body,
+    links: pane.links,
     attachments,
-    conversationMessages: panes.length,
+    conversationMessages: pane.count,
     ...when || response ? { meeting: { when: when?.replace(/^When:\s*/, "") ?? null, response: response ?? null } } : {}
   };
 }
@@ -30891,10 +31002,28 @@ async function restoreUnread(row) {
     await ax2.menu(["Message", "Toggle Unread"]);
   }), !!await until(async () => await rowUnread(row) === !0 ? !0 : null, 3000, 250);
 }
+async function waitForBody(row, stale) {
+  let probe = previewWords(row.preview).slice(0, 24), isStale = (body) => stale.has(previewWords(body)), fresh = (c2) => !!c2 && (!!probe && previewWords(c2.body).includes(probe) || !isStale(c2.body) && (!probe || c2.body.length > 0)), shown = await until(async () => {
+    let c2 = await paneContent();
+    return fresh(c2) ? c2 : null;
+  }, 1e4, 400);
+  if (shown)
+    return shown;
+  let c = await paneContent().catch(() => null);
+  if (c && isStale(c.body))
+    throw new OutlookError2(`Outlook's reading pane still shows the previous message's body instead of "${row.subject}". Retry the read.`);
+  return c;
+}
 async function readMessage(ref, opts = {}) {
+  let stale = /* @__PURE__ */ new Set, shownBefore = (await paneContent().catch(() => null))?.body;
+  for (let b of [shownBefore, lastBody])
+    if (b)
+      stale.add(previewWords(b));
   let { row, conversation } = await openMessage(ref);
-  await sleep(300);
-  let view = await readReadingPane();
+  await sleep2(300);
+  let content = (await headerInfo()).draftSubject === null ? await waitForBody(row, stale) : void 0, view = await readReadingPane(content);
+  if (lastBody = view.body || null, view.draft)
+    await noteOpenedDraft().catch(() => {});
   if (row.hasAttachments && !view.attachments.length)
     view.attachments = await until(async () => {
       let a = await readAttachments();
@@ -30976,7 +31105,7 @@ async function moveMessage(ref, destination) {
       }, 4000);
       if (!item)
         throw new OutlookError2(`The Move dialog does not offer "${label}".`);
-      await ax2.click(item.h), await sleep(300);
+      await ax2.click(item.h), await sleep2(300);
       let moveBtn = await need(sheet.h, { role: "AXButton", title: "Move" }, "the Move button", { depth: 1 });
       if ((await ax2.get(moveBtn.h)).disabled)
         throw new OutlookError2("The destination could not be selected in the Move dialog.");
@@ -30991,7 +31120,7 @@ async function setReadState(ref, read) {
   let { row } = await locateSingle(ref);
   if (row.unread === !read)
     return { changed: !1, unread: row.unread };
-  if (await selectRow(row), await sleep(800), await rowUnread(row) === !read)
+  if (await selectRow(row), await sleep2(800), await rowUnread(row) === !read)
     return { changed: !0, unread: !read };
   if (await withFocus(async () => {
     await ax2.menu(["Message", "Toggle Unread"]);
@@ -31044,6 +31173,8 @@ async function deleteMessage(ref) {
 }
 
 // src/outlook/mail.ts
+import { createHash as createHash2 } from "node:crypto";
+import { existsSync as existsSync3, mkdirSync as mkdirSync2, readFileSync as readFileSync2, renameSync as renameSync2, statSync as statSync2, writeFileSync as writeFileSync2 } from "node:fs";
 import { homedir as homedir2, tmpdir as tmpdir2 } from "node:os";
 import { join as join3 } from "node:path";
 async function folderOutline2() {
@@ -31091,7 +31222,7 @@ async function expandAll2() {
       let cell = r.children.find((c) => c.role === "AXCell");
       expandedNow.push(`${r.x?.AXDisclosureLevel}|${cell.desc.split(";")[0]}`), await ax2.set(r.h, "AXDisclosing", !0);
     }
-    await sleep(500);
+    await sleep2(500);
   }
   return expandedNow;
 }
@@ -31120,8 +31251,37 @@ async function assertNoInlineDraft2() {
   if ((await ax2.call("frontmost")).bundleId !== "com.microsoft.Outlook")
     return;
   let draft = await ax2.findOne("main", { id: "subjectTextField" }, { depth: 10 });
-  if (draft)
+  if (draft && !await isOurDraft2(draft))
     throw new OutlookError2(`A draft ("${draft.value || "no subject"}") is open in Outlook's main window. Finish, close or pop it out first; the server will not navigate away from a message you are writing.`);
+}
+var OPENED_DRAFT2 = join3(tmpdir2(), `axlook-opened-draft-${process.getuid?.() ?? "user"}.json`);
+async function draftBody2() {
+  let area = await bodyEditor("main", 1500).catch(() => null);
+  return area ? (await ax2.text(area.h)).text : "";
+}
+var draftKey2 = (subject, body) => createHash2("sha256").update(`${subject}\x00${body}`).digest("hex");
+async function noteOpenedDraft2() {
+  let draft = await ax2.findOne("main", { id: "subjectTextField" }, { depth: 10 });
+  if (!draft)
+    return;
+  let body = await draftBody2();
+  for (let i = 0;i < 6; i++) {
+    await sleep2(400);
+    let next = await draftBody2();
+    if (next === body)
+      break;
+    body = next;
+  }
+  writeFileSync2(OPENED_DRAFT2, JSON.stringify({ key: draftKey2(draft.value ?? "", body) }));
+}
+async function isOurDraft2(draft) {
+  let key;
+  try {
+    key = JSON.parse(readFileSync2(OPENED_DRAFT2, "utf8")).key;
+  } catch {
+    return !1;
+  }
+  return key === draftKey2(draft.value ?? "", await draftBody2());
 }
 async function openFolder2(folder) {
   await assertNoInlineDraft2(), await exitSearch2();
@@ -31281,7 +31441,7 @@ function toSummaries2(rows, f, q) {
     let p = previewKey2(r.preview), c = isConversation2(r) ? r.conversationCount : void 0, key = `${r.subject}\x00${r.sender}\x00${r.date}\x00${previewWords2(p)}\x00${c ? 1 : 0}`, k = seen.get(key) ?? 0;
     seen.set(key, k + 1);
     let { h, thread, ...rest } = r;
-    return { ref: encodeRef2({ v: 2, f, q, s: r.subject, n: r.sender, d: r.date, p, k, c }), index: i, ...rest };
+    return { ref: encodeRef2({ v: 2, f, q, s: r.subject, n: r.sender, d: r.date, p, k, c }), index: i, ...rest, draft: isDraftRow2(r, f) };
   });
 }
 async function searchField2() {
@@ -31321,7 +31481,7 @@ async function expandConversation2(row) {
   let rows = await readRows2(await messageTable2()), opened = rows.find((r) => r.thread?.pos === 0 && r.thread.count === row.conversationCount && stripPrefixes2(r.subject) === stripPrefixes2(row.subject));
   if (opened?.unread)
     await restoreUnread2(opened).catch(() => !1);
-  return rows;
+  return await noteOpenedDraft2().catch(() => {}), rows;
 }
 function shownMessage2(rows, d) {
   let exact = rows.filter((r) => r.thread && r.date === d.d && samePreview2(r.preview, d.p));
@@ -31358,10 +31518,12 @@ async function locate2(ref) {
     let hit = pick2(rows);
     if (hit)
       return hit;
-    if (rows.length >= want) {
+    if (rows.length >= want && want < 1000) {
       want *= 3;
       continue;
     }
+    if (rows.length >= want)
+      break;
     if (!data.q)
       break;
     let n = await cellCount2();
@@ -31441,12 +31603,12 @@ async function headerInfo2() {
 }
 async function selectRow2(row) {
   await ax2.set(row.h, "AXSelected", !0);
-  let matchesSubject = (s) => sameSubject2(s, row.subject);
+  let matchesSubject = (s) => sameSubject2(s, row.subject), draft = !1;
   if (!await until(async () => {
     if (!(await ax2.get(row.h).catch(() => null))?.selected)
       return !1;
     let h = await headerInfo2();
-    if (h.draftSubject !== null)
+    if (draft = h.draftSubject !== null, draft)
       return matchesSubject(h.draftSubject);
     if (!matchesSubject(h.subject))
       return !1;
@@ -31455,6 +31617,8 @@ async function selectRow2(row) {
     return h.from.includes(row.sender.split(",")[0].trim());
   }, 6000, 150))
     throw new OutlookError2(`Outlook did not show message "${row.subject}" in the reading pane.`);
+  if (draft)
+    await noteOpenedDraft2().catch(() => {});
 }
 async function rowUnread2(row) {
   let desc = await rowDesc2(row.h);
@@ -35258,11 +35422,11 @@ class Tokenizer {
 function mergeNameFragments(list) {
   let merged = [];
   for (let i = list.length - 1;i >= 0; i--) {
-    let current = list[i], next = merged.length ? merged[merged.length - 1] : null;
-    if (next && current.address === "" && current.name && !current.group && next.address && next.name)
-      next.name = current.name + ", " + next.name;
+    let current2 = list[i], next = merged.length ? merged[merged.length - 1] : null;
+    if (next && current2.address === "" && current2.name && !current2.group && next.address && next.name)
+      next.name = current2.name + ", " + next.name;
     else
-      merged.push(current);
+      merged.push(current2);
   }
   return merged.reverse();
 }
@@ -35901,7 +36065,7 @@ async function attachFiles(win, files, caretPlaced) {
     throw new OutlookError2("Could not focus the message body to add the attachments.");
   if (!caretPlaced)
     await ax2.key(KEY.UP, ["cmd"]);
-  await sleep(150), await ax2.pasteFiles(files);
+  await sleep2(150), await ax2.pasteFiles(files);
   let wanted = /* @__PURE__ */ new Map;
   for (let f of files)
     wanted.set(basename(f), (wanted.get(basename(f)) ?? 0) + 1);
@@ -36030,9 +36194,9 @@ async function respondDraft(ref, kind, body, opts = {}) {
         inline = !0, await ax2.press(pop.node.h);
       if (win = await waitNewWindow(before), inline = !1, await focusWindow(win), await composeRoot(win), opts.to?.length) {
         let to = await need(win.h, { id: "toTextField" }, "the To field", { depth: 6 });
-        await ax2.set(to.h, "AXFocused", !0), await sleep(150);
+        await ax2.set(to.h, "AXFocused", !0), await sleep2(150);
         for (let addr of opts.to)
-          await ax2.type(addr), await ax2.key(KEY.RETURN), await sleep(300);
+          await ax2.type(addr), await ax2.key(KEY.RETURN), await sleep2(300);
         let w = win, tokens = async () => ((await need(w.h, { id: "toTextField" }, "the To field", { depth: 6 })).value ?? "").split("￼").length - 1;
         if (!await until(async () => await tokens() >= opts.to.length, 3000, 250))
           throw new OutlookError2("The forward recipients were not accepted by Outlook.");
@@ -36114,7 +36278,7 @@ async function isolateCalendars(paths) {
   } catch (e) {
     throw await restore(), e;
   }
-  return await sleep(600), restore;
+  return await sleep2(600), restore;
 }
 var MONTHS = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"], monthIndex = (m) => MONTHS.findIndex((x) => x.startsWith(m.toLowerCase().slice(0, 3)));
 function ymd(d) {
@@ -36157,13 +36321,13 @@ function to24(t) {
   return `${String(h).padStart(2, "0")}:${m[2]}`;
 }
 async function header() {
-  let h = await need("main", { id: "cal_grid_header_date_range" }, "the calendar date header", { depth: 2 }), range = parseRange(h.value ?? "");
+  let h = await need("main", { id: "cal_grid_header_date_range" }, "the calendar date header", { depth: 5 }), range = parseRange(h.value ?? "");
   if (!range)
     throw new OutlookError2(`Unrecognised calendar header "${h.value}".`);
   return { text: h.value ?? "", range };
 }
 async function ensureWeekView() {
-  let sw = await need("main", { id: "cal_grid_header_view_switcher" }, "the calendar view switcher", { depth: 2 });
+  let sw = await need("main", { id: "cal_grid_header_view_switcher" }, "the calendar view switcher", { depth: 5 });
   if (sw.title === "Week")
     return;
   if (await withFocus(async () => {
@@ -36171,8 +36335,8 @@ async function ensureWeekView() {
     let item = await ax2.waitFor("app", { role: "AXMenuItem", id: "weekSelected" }, { timeoutMs: 3000, depth: 8 });
     if (item.ok && item.node)
       await ax2.press(item.node.h);
-    await sleep(600);
-  }), !await until(async () => (await ax2.findOne("main", { id: "cal_grid_header_view_switcher" }, { depth: 2 }))?.title === "Week", 4000))
+    await sleep2(600);
+  }), !await until(async () => (await ax2.findOne("main", { id: "cal_grid_header_view_switcher" }, { depth: 5 }))?.title === "Week", 4000))
     throw new OutlookError2("Please switch Outlook's calendar to Week view (the server could not do it).");
 }
 async function goToWeek(date6) {
@@ -36183,11 +36347,11 @@ async function goToWeek(date6) {
       return range;
     let forward = date6 > end;
     if (guard === 0 && Math.abs(date6.getTime() - range.start.getTime()) > 6048000000) {
-      let today = await need("main", { id: "cal_grid_header_today" }, "the Today button", { depth: 2 });
+      let today = await need("main", { id: "cal_grid_header_today" }, "the Today button", { depth: 5 });
       await ax2.press(today.h), await until(async () => (await header()).text !== text, 3000);
       continue;
     }
-    let btn = await need("main", { id: forward ? "cal_grid_header_next" : "cal_grid_header_previous" }, "the week navigation buttons", { depth: 2 });
+    let btn = await need("main", { id: forward ? "cal_grid_header_next" : "cal_grid_header_previous" }, "the week navigation buttons", { depth: 5 });
     if (await ax2.press(btn.h), !await until(async () => (await header()).text !== text, 4000, 100))
       throw new OutlookError2("The calendar did not move to the next week.");
   }
@@ -36336,7 +36500,7 @@ async function candidates3(data) {
 var isRefEvent = (ev, data) => ev.subject === data.s && (ev.start ?? "") === data.t && (ev.date === data.d || !!ev.endDate && ev.date <= data.d && data.d <= ev.endDate);
 async function locateEvent(ref) {
   let data = decodeRef3(ref);
-  await goToWeek(parseYmd(data.d)), await sleep(400);
+  await goToWeek(parseYmd(data.d)), await sleep2(400);
   let n = (await candidates3(data)).length, k = 0;
   for (let i = 0;i < n; i++) {
     let b = (await candidates3(data))[i], p = b ? await peek(b) : null;
@@ -36352,7 +36516,7 @@ async function locateEvent(ref) {
       data,
       async open() {
         for (let attempt = 0;attempt < 3; attempt++) {
-          await sleep(300);
+          await sleep2(300);
           let btn = (await candidates3(data))[index], pk = btn ? await peek(btn) : null;
           if (btn && pk) {
             if (isRefEvent(toEvent(btn, pk, 0), data))
@@ -36421,7 +36585,7 @@ async function setDateField(win, title, d) {
     if (!f?.value) {
       if (!f)
         return !1;
-      await sleep(300);
+      await sleep2(300);
       continue;
     }
     let cur = new Date(f.value), value = isDate ? new Date(d.getFullYear(), d.getMonth(), d.getDate(), cur.getHours(), cur.getMinutes()) : new Date(cur.getFullYear(), cur.getMonth(), cur.getDate(), d.getHours(), d.getMinutes());
@@ -36457,7 +36621,7 @@ async function chooseCalendar(win, cal) {
   if (!target)
     throw await ax2.key(KEY.ESCAPE), new OutlookError2(`Calendar "${cal.path}" is not offered in the event's calendar picker (it may be read-only).`);
   let row = await ax2.call("parent", { h: target.h });
-  await ax2.set(row.h, "AXSelected", !0).catch(() => {}), await sleep(150), await ax2.press(target.h);
+  await ax2.set(row.h, "AXSelected", !0).catch(() => {}), await sleep2(150), await ax2.press(target.h);
   let applied = async () => ((await ax2.get(picker.h)).desc ?? "").startsWith(`${cal.name} (${cal.account})`);
   if (!await until(applied, 2000, 200)) {
     if ((await ax2.children("app")).some((w) => w.title === "menuWindow"))
@@ -36480,7 +36644,7 @@ async function fillForm(win, input2, isNew) {
   if (input2.allDay !== void 0) {
     let sw = await ax2.findOne(win.h, { role: "AXCheckBox", title: "All day" }, { depth: 4 });
     if (sw && sw.value === "1" !== input2.allDay)
-      await ax2.press(sw.h), await sleep(400);
+      await ax2.press(sw.h), await sleep2(400);
   }
   let allDay = input2.allDay ?? (await ax2.findOne(win.h, { role: "AXCheckBox", title: "All day" }, { depth: 4 }))?.value === "1";
   if (input2.allDay !== void 0 && !await ax2.findOne(win.h, { role: "AXCheckBox", title: "All day" }, { depth: 4 }))
@@ -36491,7 +36655,7 @@ async function fillForm(win, input2, isNew) {
       throw new OutlookError2("The event form has no Start date field.");
     if (await setDateField(win, "Start date", s), !allDay)
       await setDateField(win, "Start time", s);
-    await sleep(250);
+    await sleep2(250);
   }
   if (input2.end) {
     let e = parseLocal(input2.end), formStart = await until(() => readDateField(win, "Start date"), 4000, 200), startTime = allDay ? null : await readDateField(win, "Start time"), s = formStart && new Date(formStart.getFullYear(), formStart.getMonth(), formStart.getDate(), startTime?.getHours() ?? 0, startTime?.getMinutes() ?? 0);
@@ -36501,11 +36665,11 @@ async function fillForm(win, input2, isNew) {
       throw new OutlookError2(`end (${input2.end}) is on another day than the event's start (${ymd(s)}), and Outlook's form has no End date field for timed events: multi-day timed events are not supported.${input2.start ? "" : " Pass start as well to move the event."}`);
     if (!allDay)
       await setDateField(win, "End time", e);
-    await sleep(250);
+    await sleep2(250);
   }
   if (input2.location !== void 0) {
     let loc = await need(win.h, { role: "AXTextField", descRegex: "^(Add a location|Locations?)$" }, "the location field", { depth: 6 });
-    await ax2.set(loc.h, "AXFocused", !0), await sleep(150), await ax2.menu(["Edit", "Select All"]).catch(() => {}), await ax2.type(input2.location), await sleep(400), await ax2.key(KEY.ESCAPE), await sleep(200);
+    await ax2.set(loc.h, "AXFocused", !0), await sleep2(150), await ax2.menu(["Edit", "Select All"]).catch(() => {}), await ax2.type(input2.location), await sleep2(400), await ax2.key(KEY.ESCAPE), await sleep2(200);
   }
   if (input2.body !== void 0) {
     let target = await bodyEditor(win.h);
@@ -36529,7 +36693,7 @@ async function fillForm(win, input2, isNew) {
     let subj = await ax2.findOne(win.h, { role: "AXTextField", desc: "Subject" }, { depth: 4 });
     if (subj)
       await ax2.set(subj.h, "AXFocused", !0);
-    await sleep(1000);
+    await sleep2(1000);
   }
   if (input2.location !== void 0)
     await checkLocation(win, input2.location);
@@ -36700,7 +36864,7 @@ async function deleteEvent(ref) {
       if (cancel)
         await ax2.press(cancel.h);
     }
-    if (await sleep(500), (await gridButtons()).filter((b) => b.label.startsWith(data.s) && (b.allDay || b.day === data.d)).length < countBefore)
+    if (await sleep2(500), (await gridButtons()).filter((b) => b.label.startsWith(data.s) && (b.allDay || b.day === data.d)).length < countBefore)
       return { deleted: !0, notified: "unknown", subject: data.s, date: data.d };
     throw new OutlookError2("Outlook asked for confirmation (probably to notify attendees). Nothing was deleted.");
   }
@@ -36958,7 +37122,7 @@ function htmlToText3(html) {
 }
 
 // src/conventions.ts
-import { copyFileSync, existsSync as existsSync3, mkdirSync as mkdirSync2, readFileSync, renameSync as renameSync2, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync as existsSync4, mkdirSync as mkdirSync3, readFileSync as readFileSync3, renameSync as renameSync3, writeFileSync as writeFileSync3 } from "node:fs";
 import { homedir as homedir3 } from "node:os";
 import { join as join4 } from "node:path";
 var DEFAULT_KEYS = ["default_calendar", "default_from"], MAX_CHARS = 8000;
@@ -36986,9 +37150,9 @@ function parseConventions(raw) {
   return { defaults, body: text.slice(m[0].length).trim() };
 }
 function readConventions(path = conventionsPath()) {
-  if (!existsSync3(path))
+  if (!existsSync4(path))
     return { path, exists: !1, defaults: {}, settings: {}, body: "", raw: "" };
-  let raw = readFileSync(path, "utf8"), { defaults: all, body } = parseConventions(raw), defaults = {}, settings = {};
+  let raw = readFileSync3(path, "utf8"), { defaults: all, body } = parseConventions(raw), defaults = {}, settings = {};
   for (let [k, v] of Object.entries(all))
     if (DEFAULT_KEYS.includes(k))
       defaults[k] = v;
@@ -37002,13 +37166,13 @@ function writeConventions(content, path = conventionsPath()) {
 `;
   if (text.length > MAX_CHARS)
     throw Error(`Conventions are limited to ${MAX_CHARS} characters (got ${text.length}); keep them to the rules that matter.`);
-  if (mkdirSync2(join4(path, ".."), { recursive: !0 }), existsSync3(path)) {
-    if (readFileSync(path, "utf8") === text)
+  if (mkdirSync3(join4(path, ".."), { recursive: !0 }), existsSync4(path)) {
+    if (readFileSync3(path, "utf8") === text)
       return { ...readConventions(path), changed: !1 };
     copyFileSync(path, `${path}.bak`);
   }
   let tmp = `${path}.tmp-${process.pid}`;
-  return writeFileSync(tmp, text, { encoding: "utf8", mode: 384 }), renameSync2(tmp, path), { ...readConventions(path), changed: !0 };
+  return writeFileSync3(tmp, text, { encoding: "utf8", mode: 384 }), renameSync3(tmp, path), { ...readConventions(path), changed: !0 };
 }
 function conventionsInstructions(c) {
   if (!c.exists || !c.body && !Object.keys(c.defaults).length && !Object.keys(c.settings).length)
@@ -37025,7 +37189,7 @@ function conventionsInstructions(c) {
 // package.json
 var package_default = {
   name: "axlook-mcp",
-  version: "0.3.0",
+  version: "0.3.1",
   description: "MCP server for New Outlook for Mac: mail, drafts and calendars through macOS Accessibility, no Graph API or tokens",
   keywords: [
     "mcp",
@@ -37093,7 +37257,7 @@ function conventionDefault(key) {
     return;
   }
 }
-var server = new McpServer({ name: "axlook", version: package_default.version }, {
+var mcp = new McpServer({ name: "axlook", version: package_default.version }, {
   instructions: [
     "Controls the user's running New Outlook for Mac (all accounts, including Exchange) through macOS Accessibility.",
     "Use these tools for every question about the user's email or calendars (reading, searching, drafts, events, availability), even when Outlook is not named, unless the user explicitly names another source.",
@@ -37113,23 +37277,38 @@ function ok(data) {
 function fail(e) {
   return { content: [{ type: "text", text: e instanceof OutlookError ? e.message : e instanceof Error ? `Unexpected error: ${e.message}` : String(e) }], isError: !0 };
 }
-function run(fn) {
-  return async (args) => {
+function run(fn, opts = {}) {
+  let label = "call", handler = async (args) => {
     try {
-      return ok(await exclusive(() => fn(args)));
+      return ok(await exclusive(() => fn(args), { label, timeoutMs: CALL_TIMEOUT_MS * (opts.slow ? 3 : 1) }));
     } catch (e) {
       return fail(e);
     }
   };
+  return Object.assign(handler, { named: (name) => (label = name, handler) });
 }
-var ref = exports_external.string().describe("Message ref returned by outlook_list_messages / outlook_search_messages"), eventRef = exports_external.string().describe("Event ref returned by outlook_list_events"), RO = { readOnlyHint: !0, openWorldHint: !1 }, WRITE = { readOnlyHint: !1, destructiveHint: !1, openWorldHint: !1 }, expandHome = (p) => p.startsWith("~") ? join5(homedir4(), p.slice(1)) : p, attachments = exports_external.array(exports_external.string()).optional().describe("Local files to add (absolute or ~/ paths). Images are embedded in the body after your text; other files are attached.");
+run.direct = (fn) => {
+  let handler = async (args) => {
+    try {
+      return ok(await fn(args));
+    } catch (e) {
+      return fail(e);
+    }
+  };
+  return Object.assign(handler, { named: () => handler });
+};
+var server = {
+  registerTool(name, config2, handler) {
+    mcp.registerTool(name, config2, handler.named?.(name) ?? handler);
+  }
+}, ref = exports_external.string().describe("Message ref returned by outlook_list_messages / outlook_search_messages"), eventRef = exports_external.string().describe("Event ref returned by outlook_list_events"), RO = { readOnlyHint: !0, openWorldHint: !1 }, WRITE = { readOnlyHint: !1, destructiveHint: !1, openWorldHint: !1 }, expandHome = (p) => p.startsWith("~") ? join5(homedir4(), p.slice(1)) : p, attachments = exports_external.array(exports_external.string()).optional().describe("Local files to add (absolute or ~/ paths). Images are embedded in the body after your text; other files are attached.");
 function localFiles(paths) {
   if (!paths?.length)
     return;
   return paths.map((p) => {
     let abs = resolve3(expandHome(p)), ok2 = !1;
     try {
-      ok2 = statSync2(abs).isFile();
+      ok2 = statSync3(abs).isFile();
     } catch {}
     if (!ok2)
       throw new OutlookError(`Attachment not found or not a file: ${abs}`);
@@ -37140,7 +37319,10 @@ server.registerTool("outlook_status", {
   description: "Check that Outlook is running, Accessibility permission is granted, and list Outlook's windows.",
   inputSchema: {},
   annotations: RO
-}, run(async () => {
+}, run.direct(async () => {
+  let running = busy();
+  if (running)
+    return { busy: running, note: "Another call is running; calls are serialized. Status of Outlook itself is not checked meanwhile." };
   let st = await status(), front = await ax.call("frontmost");
   return {
     ...st,
@@ -37210,7 +37392,7 @@ server.registerTool("outlook_get_message_source", {
     if (!target)
       rmSync(path, { force: !0 });
   }
-}));
+}, { slow: !0 }));
 server.registerTool("outlook_save_attachments", {
   description: "Download a message's attachments to a local folder (via the message's .eml export). By default saves every attachment except images shown inside the body (signatures, logos); never overwrites files.",
   inputSchema: {
@@ -37233,7 +37415,7 @@ server.registerTool("outlook_save_attachments", {
   } finally {
     rmSync(path, { force: !0 });
   }
-}));
+}, { slow: !0 }));
 server.registerTool("outlook_move_message", {
   description: "Move a message to another folder (within any account). Briefly brings Outlook to the front.",
   inputSchema: { ref, destination: exports_external.string().describe("Destination folder path from outlook_list_folders") },
@@ -37276,17 +37458,17 @@ server.registerTool("outlook_create_draft", {
 }, run(async (a) => {
   let from = a.from ?? conventionDefault("default_from");
   return { ...await createDraft({ ...a, from, attachments: localFiles(a.attachments) }), fromSource: a.from ? "argument" : from ? "conventions default_from" : "Outlook default" };
-}));
+}, { slow: !0 }));
 server.registerTool("outlook_create_reply_draft", {
   description: "Create a reply (or reply-all) draft to a message, with your text above the quoted original. Saved to Drafts, NOT sent.",
   inputSchema: { ref, body: exports_external.string(), reply_all: exports_external.boolean().default(!1), html: exports_external.boolean().default(!1), attachments },
   annotations: WRITE
-}, run(async (a) => respondDraft(a.ref, a.reply_all ? "replyAll" : "reply", a.body, { html: a.html, attachments: localFiles(a.attachments) })));
+}, run(async (a) => respondDraft(a.ref, a.reply_all ? "replyAll" : "reply", a.body, { html: a.html, attachments: localFiles(a.attachments) }), { slow: !0 }));
 server.registerTool("outlook_create_forward_draft", {
   description: "Create a forward draft of a message (attachments included by Outlook). Saved to Drafts, NOT sent.",
   inputSchema: { ref, to: exports_external.array(exports_external.string()).default([]), body: exports_external.string().default(""), html: exports_external.boolean().default(!1), attachments },
   annotations: WRITE
-}, run(async (a) => respondDraft(a.ref, "forward", a.body, { to: a.to, html: a.html, attachments: localFiles(a.attachments) })));
+}, run(async (a) => respondDraft(a.ref, "forward", a.body, { to: a.to, html: a.html, attachments: localFiles(a.attachments) }), { slow: !0 }));
 server.registerTool("outlook_list_calendars", {
   description: "List calendars of all accounts as paths like 'account/My Calendars/Calendar', and whether each is shown.",
   inputSchema: {},
@@ -37373,7 +37555,7 @@ default_calendar: me@example.com/Calendar
   }
 });
 var transport = new StdioServerTransport;
-await server.connect(transport);
+await mcp.connect(transport);
 process.on("SIGINT", () => {
   ax.close(), process.exit(0);
 });

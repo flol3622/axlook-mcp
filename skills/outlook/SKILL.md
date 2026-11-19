@@ -47,8 +47,9 @@ The user may have saved their own rules: which calendar each kind of event goes 
   - `screenLocked: true`: the Mac must be unlocked.
   - `trusted: false`: the app running Claude needs Accessibility permission, in System Settings → Privacy & Security → Accessibility. Restart that app afterwards.
   - `outlookRunning: false`: start Outlook.
+  - `busy`: another call is still running; wait for it rather than retrying. A call that times out leaves the next one a fresh start.
 - A stale ref means the list changed: list or search again.
-- If the user is typing a draft in Outlook, tools refuse to navigate away. Ask them to finish or close it.
+- If the user is typing a draft in Outlook, tools refuse to navigate away. Ask them to finish or close it. A draft the tools opened themselves (reading a draft opens it for editing) does not block them while it is unchanged. Rows with `draft: true` are saved drafts.
 
 ## Response style
 

@@ -1,5 +1,6 @@
 // Mail: folders, message lists, search, reading, .eml export, moving and flags — all through Outlook's UI.
-import { existsSync, mkdirSync, renameSync, statSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { ax, bodyEditor, need, OutlookError, pressMenu, sleep, switchModule, until, withFocus } from "./session";
@@ -158,11 +159,49 @@ async function assertNoInlineDraft() {
   const front = await ax.call<{ bundleId?: string }>("frontmost");
   if (front.bundleId !== "com.microsoft.Outlook") return;
   const draft = await ax.findOne("main", { id: "subjectTextField" }, { depth: 10 });
-  if (draft) {
+  if (draft && !(await isOurDraft(draft))) {
     throw new OutlookError(
       `A draft ("${draft.value || "no subject"}") is open in Outlook's main window. Finish, close or pop it out first; the server will not navigate away from a message you are writing.`,
     );
   }
+}
+
+/**
+ * A saved draft opens for editing when its row is selected. When the server selected it (to read it, or as
+ * the newest item of a conversation), remember how it looked: if nobody changed it since, moving on is safe.
+ * Kept in a file so that a restarted server, or another session's server, recognises it too.
+ */
+const OPENED_DRAFT = join(tmpdir(), `axlook-opened-draft-${process.getuid?.() ?? "user"}.json`);
+
+async function draftBody(): Promise<string> {
+  const area = await bodyEditor("main", 1500).catch(() => null);
+  return area ? (await ax.text(area.h)).text : "";
+}
+
+const draftKey = (subject: string, body: string) => createHash("sha256").update(`${subject}\u0000${body}`).digest("hex");
+
+async function noteOpenedDraft() {
+  const draft = await ax.findOne("main", { id: "subjectTextField" }, { depth: 10 });
+  if (!draft) return;
+  // The body loads after the subject: wait until it stops changing.
+  let body = await draftBody();
+  for (let i = 0; i < 6; i++) {
+    await sleep(400);
+    const next = await draftBody();
+    if (next === body) break;
+    body = next;
+  }
+  writeFileSync(OPENED_DRAFT, JSON.stringify({ key: draftKey(draft.value ?? "", body) }));
+}
+
+async function isOurDraft(draft: AxNode): Promise<boolean> {
+  let key: string | undefined;
+  try {
+    key = JSON.parse(readFileSync(OPENED_DRAFT, "utf8")).key;
+  } catch {
+    return false;
+  }
+  return key === draftKey(draft.value ?? "", await draftBody());
 }
 
 /** Open a folder in the main window; returns its row. Leaves any search mode. */
@@ -199,6 +238,8 @@ export interface MessageSummary {
   forwarded: boolean;
   hasAttachments: boolean;
   meeting: boolean; // meeting invitation / response
+  /** A saved draft (known from its folder; drafts moved elsewhere, e.g. to Deleted Items, are not recognised). */
+  draft: boolean;
   completed: boolean; // flag marked as completed
   conversationCount: number | null;
   unreadInConversation: number | null;
@@ -206,7 +247,7 @@ export interface MessageSummary {
   group: string | null; // "Today", "Yesterday", "Last Week"…
 }
 
-interface RowInfo extends Omit<MessageSummary, "ref" | "index"> {
+interface RowInfo extends Omit<MessageSummary, "ref" | "index" | "draft"> {
   h: string;
   /** Set on the messages of an expanded conversation: `id` tells conversations apart, `pos` 0 is the newest. */
   thread?: { id: number; count: number; pos: number };
@@ -436,7 +477,7 @@ function toSummaries(rows: RowInfo[], f: string, q?: string): MessageSummary[] {
     const k = seen.get(key) ?? 0;
     seen.set(key, k + 1);
     const { h, thread, ...rest } = r;
-    return { ref: encodeRef({ v: 2, f, q, s: r.subject, n: r.sender, d: r.date, p, k, c }), index: i, ...rest };
+    return { ref: encodeRef({ v: 2, f, q, s: r.subject, n: r.sender, d: r.date, p, k, c }), index: i, ...rest, draft: isDraftRow(r, f) };
   });
 }
 
@@ -545,6 +586,7 @@ async function expandConversation(row: RowInfo): Promise<RowInfo[]> {
   const rows = await readRows(await messageTable());
   const opened = rows.find((r) => r.thread?.pos === 0 && r.thread.count === row.conversationCount && stripPrefixes(r.subject) === stripPrefixes(row.subject));
   if (opened?.unread) await restoreUnread(opened).catch(() => false);
+  await noteOpenedDraft().catch(() => {});
   return rows;
 }
 
@@ -597,10 +639,12 @@ async function locate(ref: string): Promise<Located> {
     rows = await loadRows(want);
     const hit = pick(rows);
     if (hit) return hit;
-    if (rows.length >= want) {
+    // Past a thousand rows the ref is more likely stale than far down: give up rather than scroll on.
+    if (rows.length >= want && want < 1000) {
       want *= 3;
       continue;
     }
+    if (rows.length >= want) break;
     // Everything is loaded, but search results keep arriving in batches for a while.
     if (!data.q) break;
     const n = await cellCount();
@@ -730,21 +774,48 @@ async function headerInfo(): Promise<{ subject: string | null; from: string | nu
 async function selectRow(row: RowInfo) {
   await ax.set(row.h, "AXSelected", true);
   const matchesSubject = (s: string | null) => sameSubject(s, row.subject);
+  let draft = false;
   const ok = await until(async () => {
     const sel = await ax.get(row.h).catch(() => null);
     if (!sel?.selected) return false;
     const h = await headerInfo();
-    if (h.draftSubject !== null) return matchesSubject(h.draftSubject);
+    draft = h.draftSubject !== null;
+    if (draft) return matchesSubject(h.draftSubject);
     if (!matchesSubject(h.subject)) return false;
     // Conversation headers show the thread; single messages must also match the sender.
     if (row.conversationCount || !h.from) return true;
     return h.from.includes(row.sender.split(",")[0]!.trim());
   }, 6000, 150);
   if (!ok) throw new OutlookError(`Outlook did not show message "${row.subject}" in the reading pane.`);
+  if (draft) await noteOpenedDraft().catch(() => {});
 }
 
 // ---------------------------------------------------------------------------------------------
 // Reading
+
+interface PaneContent {
+  body: string;
+  links: { text: string; url: string }[];
+  /** Message bodies shown (a conversation shows several). */
+  count: number;
+}
+
+/** The reading pane's message bodies (one web area per message shown); null when there is none. */
+async function paneContent(): Promise<PaneContent | null> {
+  const panes = await ax.find("main", { role: "AXWebArea", desc: "Reading Pane" }, { depth: 12, limit: 50 });
+  if (!panes.length) return null;
+  const parts: string[] = [];
+  const links: { text: string; url: string }[] = [];
+  for (const p of panes) {
+    const t = await ax.text(p.h);
+    parts.push(t.text.trim());
+    links.push(...t.links);
+  }
+  return { body: parts.filter(Boolean).join("\n\n— — —\n\n"), links, count: panes.length };
+}
+
+/** The body the last read returned: a reading pane that still shows it after a new selection is stale. */
+let lastBody: string | null = null;
 
 export interface MessageView {
   ref: string;
@@ -758,6 +829,8 @@ export interface MessageView {
   conversationMessages: number;
   /** Meeting invitations and responses: the meeting's time and the response shown. */
   meeting?: { when: string | null; response: string | null };
+  /** A saved draft (Outlook opens drafts for editing; the server leaves it as it was). */
+  draft?: boolean;
   unreadRestored?: boolean;
   /** When the ref was a conversation: its messages, newest first. The one read is the one its row showed. */
   conversation?: MessageSummary[];
@@ -770,8 +843,12 @@ function cleanHeader(v: string | undefined, prefix: RegExp) {
   return v ? v.replace(prefix, "").replace(PRESENCE, "").trim() : null;
 }
 
-async function readReadingPane(): Promise<Omit<MessageView, "ref">> {
-  const header = await messageHeader();
+/** Read the message shown in the reading pane; `content` is its body when already read. */
+async function readReadingPane(content?: PaneContent | null): Promise<Omit<MessageView, "ref">> {
+  // The pane may be re-rendering (e.g. search results still arriving): wait for a header or a draft form.
+  const found = await until(async () => (await messageHeader()) ?? ((await ax.findOne("main", { id: "subjectTextField" }, { depth: 9 })) ? "draft" : null), 4000, 250);
+  if (!found) throw new OutlookError("Could not find the reading pane in Outlook's UI.");
+  const header = found === "draft" ? null : found;
   if (!header) {
     // A draft opened for editing.
     const subj = await need("main", { id: "subjectTextField" }, "the reading pane", { depth: 9 });
@@ -786,6 +863,7 @@ async function readReadingPane(): Promise<Omit<MessageView, "ref">> {
       links: [],
       attachments: [],
       conversationMessages: 1,
+      draft: true,
     };
   }
   const flat = header.fields;
@@ -797,24 +875,17 @@ async function readReadingPane(): Promise<Omit<MessageView, "ref">> {
   const sent = flat.find((n) => n.id === "messageHeaderTimeStampContent")?.value ?? null;
   const when = flat.find((n) => n.id === "messageHeaderWhenContent")?.value;
   const response = flat.find((n) => n.id === "messageHeaderResponseStatusContent")?.value;
-  const panes = await ax.find("main", { role: "AXWebArea", desc: "Reading Pane" }, { depth: 12, limit: 50 });
-  const parts: string[] = [];
-  const links: { text: string; url: string }[] = [];
-  for (const p of panes) {
-    const t = await ax.text(p.h);
-    parts.push(t.text.trim());
-    links.push(...t.links);
-  }
+  const pane = content ?? (await paneContent()) ?? { body: "", links: [], count: 0 };
   const attachments = await readAttachments();
   return {
     subject,
     from: cleanHeader(from, /^From:\s*/),
     recipients: cleanHeader(rcpt, /^Recipients:\s*/),
     sent,
-    body: parts.filter(Boolean).join("\n\n— — —\n\n"),
-    links,
+    body: pane.body,
+    links: pane.links,
     attachments,
-    conversationMessages: panes.length,
+    conversationMessages: pane.count,
     ...(when || response ? { meeting: { when: when?.replace(/^When:\s*/, "") ?? null, response: response ?? null } } : {}),
   };
 }
@@ -851,10 +922,40 @@ async function restoreUnread(row: RowInfo): Promise<boolean> {
   return !!(await until(async () => ((await rowUnread(row)) === true ? true : null), 3000, 250));
 }
 
+/**
+ * Wait until the reading pane shows the selected row's body. Outlook updates the header first and the body
+ * (a web view) later, sometimes much later: until then the pane still holds the previous message. The row's
+ * preview is the start of its body; previews can include text the body does not show (hidden preheaders), so
+ * a body that differs from the previous one is accepted too.
+ */
+async function waitForBody(row: RowInfo, stale: Set<string>): Promise<PaneContent | null> {
+  const probe = previewWords(row.preview).slice(0, 24);
+  const isStale = (body: string) => stale.has(previewWords(body));
+  const fresh = (c: PaneContent | null) =>
+    !!c && ((!!probe && previewWords(c.body).includes(probe)) || (!isStale(c.body) && (!probe || c.body.length > 0)));
+  const shown = await until(async () => {
+    const c = await paneContent();
+    return fresh(c) ? c : null;
+  }, 10_000, 400);
+  if (shown) return shown;
+  const c = await paneContent().catch(() => null);
+  if (c && isStale(c.body)) {
+    throw new OutlookError(`Outlook's reading pane still shows the previous message's body instead of "${row.subject}". Retry the read.`);
+  }
+  return c;
+}
+
 export async function readMessage(ref: string, opts: { markAsRead?: boolean } = {}): Promise<MessageView> {
+  // Bodies a pane that did not switch could still show: the one on screen now and the one read last.
+  const stale = new Set<string>();
+  const shownBefore = (await paneContent().catch(() => null))?.body;
+  for (const b of [shownBefore, lastBody]) if (b) stale.add(previewWords(b));
   const { row, conversation } = await openMessage(ref);
   await sleep(300);
-  const view = await readReadingPane();
+  const content = (await headerInfo()).draftSubject === null ? await waitForBody(row, stale) : undefined;
+  const view = await readReadingPane(content);
+  lastBody = view.body || null;
+  if (view.draft) await noteOpenedDraft().catch(() => {});
   if (row.hasAttachments && !view.attachments.length) {
     // The attachment list appears once Outlook has downloaded the message.
     view.attachments = (await until(async () => {
